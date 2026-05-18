@@ -1,0 +1,10 @@
+.git
+.cache
+.playwright-mcp
+.playwright-console*.txt
+backend/api
+backend/storage
+frontend/dist
+frontend/node_modules
+**/.DS_Store
+**/*.log
