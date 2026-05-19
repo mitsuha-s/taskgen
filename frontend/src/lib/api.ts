@@ -27,11 +27,13 @@ export type RunSummary = {
 export type ExtractionRun = {
   id: string;
   assignment_id: string;
-  status: 'pending' | 'running' | 'succeeded' | 'failed';
+  status: 'pending' | 'running' | 'awaiting_confirmation' | 'succeeded' | 'failed';
+  current_step: number;
   provider?: string;
   model?: string;
   prompt_version?: string;
-  parsed_content: ParsedAssignment | null;
+  parsed_content: PipelineContent | null;
+  step_results: PipelineStepResult[];
   warnings: WarningEntry[];
   error_message?: string;
   created_at: string;
@@ -39,24 +41,20 @@ export type ExtractionRun = {
   finished_at?: string;
 };
 
-export type ParsedAssignment = {
-  title: string | null;
-  subject: 'english';
-  detected_language: string;
-  estimated_level: string;
-  sections: ParsedSection[];
-  warnings: WarningEntry[];
+export type PipelineContent = {
+  markdown?: string;
+  parameters?: string;
+  variation_rules?: string;
+  variant_markdown?: string;
+  steps: PipelineStepResult[];
 };
 
-export type ParsedSection = {
-  id: string;
-  type: string;
-  title: string | null;
-  instruction: string | null;
-  text: string | null;
-  items: Array<Record<string, unknown>>;
-  left_items?: string[];
-  right_items?: string[];
+export type PipelineStepResult = {
+  step: number;
+  key: string;
+  title: string;
+  content: string;
+  created_at: string;
 };
 
 export type WarningEntry = {
@@ -143,6 +141,11 @@ export const api = {
     request<Assignment>(`/api/assignments/${assignmentId}`),
   getExtractionRun: (runId: string) =>
     request<ExtractionRun>(`/api/extraction-runs/${runId}`),
+  continueExtractionRun: (runId: string) =>
+    request<{ extraction_run_id: string; status: string; next_step: number }>(
+      `/api/extraction-runs/${runId}/continue`,
+      { method: 'POST' },
+    ),
 };
 
 export function userMessage(error: unknown): string {

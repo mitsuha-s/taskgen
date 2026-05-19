@@ -3,6 +3,7 @@ package llm
 import (
 	"context"
 	"encoding/json"
+	"strings"
 )
 
 type MockProvider struct{}
@@ -25,6 +26,8 @@ func (p *MockProvider) AnalyzeAssignmentImage(ctx context.Context, req AnalyzeAs
 				"instruction": "Choose the correct answer.",
 				"text":        nil,
 				"items":       []any{},
+				"left_items":  nil,
+				"right_items": nil,
 			},
 			map[string]any{
 				"id":          "section_2",
@@ -46,6 +49,8 @@ func (p *MockProvider) AnalyzeAssignmentImage(ctx context.Context, req AnalyzeAs
 						"answer":   nil,
 					},
 				},
+				"left_items":  nil,
+				"right_items": nil,
 			},
 		},
 		"warnings": []any{},
@@ -59,5 +64,57 @@ func (p *MockProvider) AnalyzeAssignmentImage(ctx context.Context, req AnalyzeAs
 		ParsedJSON:  content,
 		Provider:    "mock",
 		Model:       "mock-vision-v1",
+	}, nil
+}
+
+func (p *MockProvider) ConvertAssignmentImageToMarkdown(ctx context.Context, req ConvertAssignmentImageToMarkdownRequest) (*TextGenerationResponse, error) {
+	content := `# English Grammar Test
+
+Choose the correct answer.
+
+1. She ___ to school yesterday.
+   - go
+   - went
+   - goes
+
+2. They ___ football every Sunday.
+   - plays
+   - play
+   - played`
+
+	return &TextGenerationResponse{
+		RawResponse: content,
+		Content:     content,
+		Provider:    "mock",
+		Model:       "mock-vision-v1",
+	}, nil
+}
+
+func (p *MockProvider) GenerateAssignmentText(ctx context.Context, req GenerateAssignmentTextRequest) (*TextGenerationResponse, error) {
+	content := "Предметная область: Иностранные языки\nТип задания: Множественный выбор (Multiple choice)\nПредполагаемый класс: 5\nУровень сложности задания: 3"
+	if strings.Contains(req.Prompt, "Допустимый характер вариации") {
+		content = "синонимическая замена неключевых формулировок, изменение порядка перечисления"
+	}
+	if strings.Contains(req.Prompt, "создать ещё один новый вариант") && strings.Contains(req.Prompt, "Допустимые изменения") {
+		content = `# English Grammar Test
+
+Choose the correct answer.
+
+1. He ___ breakfast at seven yesterday.
+   - have
+   - had
+   - has
+
+2. We ___ English on Mondays.
+   - studies
+   - study
+   - studied`
+	}
+
+	return &TextGenerationResponse{
+		RawResponse: content,
+		Content:     content,
+		Provider:    "mock",
+		Model:       "mock-text-v1",
 	}, nil
 }

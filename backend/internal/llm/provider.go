@@ -7,6 +7,8 @@ import (
 
 type VisionProvider interface {
 	AnalyzeAssignmentImage(ctx context.Context, req AnalyzeAssignmentImageRequest) (*AnalyzeAssignmentImageResponse, error)
+	ConvertAssignmentImageToMarkdown(ctx context.Context, req ConvertAssignmentImageToMarkdownRequest) (*TextGenerationResponse, error)
+	GenerateAssignmentText(ctx context.Context, req GenerateAssignmentTextRequest) (*TextGenerationResponse, error)
 }
 
 type AnalyzeAssignmentImageRequest struct {
@@ -15,9 +17,28 @@ type AnalyzeAssignmentImageRequest struct {
 	PromptVersion string
 }
 
+type ConvertAssignmentImageToMarkdownRequest struct {
+	ImagePath     string
+	MimeType      string
+	Prompt        string
+	PromptVersion string
+}
+
+type GenerateAssignmentTextRequest struct {
+	Prompt        string
+	PromptVersion string
+}
+
 type AnalyzeAssignmentImageResponse struct {
 	RawResponse string
 	ParsedJSON  map[string]any
+	Provider    string
+	Model       string
+}
+
+type TextGenerationResponse struct {
+	RawResponse string
+	Content     string
 	Provider    string
 	Model       string
 }

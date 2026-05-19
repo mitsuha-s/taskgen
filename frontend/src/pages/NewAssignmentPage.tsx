@@ -134,7 +134,7 @@ export default function NewAssignmentPage() {
               ) : (
                 <UploadCloud className="h-4 w-4" aria-hidden="true" />
               )}
-              Распознать задание
+              Начать обработку
             </button>
           </div>
         </section>

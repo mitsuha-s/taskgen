@@ -138,6 +138,106 @@ func (p *GigaChatProvider) AnalyzeAssignmentImage(ctx context.Context, req Analy
 	}, nil
 }
 
+func (p *GigaChatProvider) ConvertAssignmentImageToMarkdown(ctx context.Context, req ConvertAssignmentImageToMarkdownRequest) (*TextGenerationResponse, error) {
+	if strings.TrimSpace(p.authKey) == "" {
+		return &TextGenerationResponse{
+			Provider: "gigachat",
+			Model:    p.model,
+		}, ErrProviderNotConfigured
+	}
+	if req.MimeType == "image/webp" {
+		return &TextGenerationResponse{
+			Provider: "gigachat",
+			Model:    p.model,
+		}, errors.New("GigaChat image upload supports jpeg/png/tiff/bmp; webp is not supported")
+	}
+
+	token, err := p.token(ctx)
+	if err != nil {
+		return &TextGenerationResponse{
+			Provider: "gigachat",
+			Model:    p.model,
+		}, err
+	}
+
+	fileID, uploadRaw, err := p.uploadFile(ctx, token, req.ImagePath, req.MimeType)
+	if err != nil {
+		return &TextGenerationResponse{
+			RawResponse: uploadRaw,
+			Provider:    "gigachat",
+			Model:       p.model,
+		}, err
+	}
+
+	raw, content, err := p.chatText(ctx, token, []map[string]any{
+		{
+			"role":    "system",
+			"content": "You convert school assignment images into faithful markdown. Return only the requested content.",
+		},
+		{
+			"role":        "user",
+			"content":     req.Prompt,
+			"attachments": []string{fileID},
+		},
+	})
+	if err != nil {
+		return &TextGenerationResponse{
+			RawResponse: raw,
+			Provider:    "gigachat",
+			Model:       p.model,
+		}, err
+	}
+
+	return &TextGenerationResponse{
+		RawResponse: raw,
+		Content:     content,
+		Provider:    "gigachat",
+		Model:       p.model,
+	}, nil
+}
+
+func (p *GigaChatProvider) GenerateAssignmentText(ctx context.Context, req GenerateAssignmentTextRequest) (*TextGenerationResponse, error) {
+	if strings.TrimSpace(p.authKey) == "" {
+		return &TextGenerationResponse{
+			Provider: "gigachat",
+			Model:    p.model,
+		}, ErrProviderNotConfigured
+	}
+
+	token, err := p.token(ctx)
+	if err != nil {
+		return &TextGenerationResponse{
+			Provider: "gigachat",
+			Model:    p.model,
+		}, err
+	}
+
+	raw, content, err := p.chatText(ctx, token, []map[string]any{
+		{
+			"role":    "system",
+			"content": "You process school assignments according to the user instructions. Return only the requested content.",
+		},
+		{
+			"role":    "user",
+			"content": req.Prompt,
+		},
+	})
+	if err != nil {
+		return &TextGenerationResponse{
+			RawResponse: raw,
+			Provider:    "gigachat",
+			Model:       p.model,
+		}, err
+	}
+
+	return &TextGenerationResponse{
+		RawResponse: raw,
+		Content:     content,
+		Provider:    "gigachat",
+		Model:       p.model,
+	}, nil
+}
+
 func (p *GigaChatProvider) token(ctx context.Context) (string, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -246,9 +346,10 @@ func (p *GigaChatProvider) uploadFile(ctx context.Context, token, imagePath, mim
 
 func (p *GigaChatProvider) chat(ctx context.Context, token, fileID, promptVersion string) (string, string, error) {
 	payload := map[string]any{
-		"model":       p.model,
-		"temperature": 0.1,
-		"stream":      false,
+		"model":           p.model,
+		"temperature":     0.1,
+		"stream":          false,
+		"response_format": assignmentResponseFormat(),
 		"messages": []map[string]any{
 			{
 				"role":    "system",
@@ -262,6 +363,21 @@ func (p *GigaChatProvider) chat(ctx context.Context, token, fileID, promptVersio
 		},
 	}
 
+	return p.chatCompletion(ctx, token, payload)
+}
+
+func (p *GigaChatProvider) chatText(ctx context.Context, token string, messages []map[string]any) (string, string, error) {
+	payload := map[string]any{
+		"model":       p.model,
+		"temperature": 0.2,
+		"stream":      false,
+		"messages":    messages,
+	}
+
+	return p.chatCompletion(ctx, token, payload)
+}
+
+func (p *GigaChatProvider) chatCompletion(ctx context.Context, token string, payload map[string]any) (string, string, error) {
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return "", "", err
@@ -303,12 +419,130 @@ func (p *GigaChatProvider) chat(ctx context.Context, token, fileID, promptVersio
 	return raw, parsed.Choices[0].Message.Content, nil
 }
 
+func assignmentResponseFormat() map[string]any {
+	return map[string]any{
+		"type":   "json_schema",
+		"schema": assignmentJSONSchema(),
+		"strict": true,
+	}
+}
+
+func assignmentJSONSchema() map[string]any {
+	nullableString := map[string]any{
+		"anyOf": []map[string]any{
+			{"type": "string"},
+			{"type": "null"},
+		},
+	}
+	nullableStringArray := map[string]any{
+		"anyOf": []map[string]any{
+			{
+				"type":  "array",
+				"items": map[string]any{"type": "string"},
+			},
+			{"type": "null"},
+		},
+	}
+
+	return map[string]any{
+		"type":                 "object",
+		"additionalProperties": false,
+		"required": []string{
+			"title",
+			"subject",
+			"detected_language",
+			"estimated_level",
+			"sections",
+			"warnings",
+		},
+		"properties": map[string]any{
+			"title": nullableString,
+			"subject": map[string]any{
+				"type": "string",
+				"enum": []string{"english"},
+			},
+			"detected_language": map[string]any{
+				"type": "string",
+				"enum": []string{"en", "ru", "mixed", "unknown"},
+			},
+			"estimated_level": map[string]any{
+				"type": "string",
+				"enum": []string{"A1", "A2", "B1", "B2", "C1", "C2", "unknown"},
+			},
+			"sections": map[string]any{
+				"type": "array",
+				"items": map[string]any{
+					"type":                 "object",
+					"additionalProperties": false,
+					"required": []string{
+						"id",
+						"type",
+						"title",
+						"instruction",
+						"text",
+						"items",
+						"left_items",
+						"right_items",
+					},
+					"properties": map[string]any{
+						"id": map[string]any{"type": "string"},
+						"type": map[string]any{
+							"type": "string",
+							"enum": []string{
+								"instruction",
+								"reading_text",
+								"multiple_choice",
+								"fill_gap",
+								"matching",
+								"open_question",
+								"unknown",
+							},
+						},
+						"title":       nullableString,
+						"instruction": nullableString,
+						"text":        nullableString,
+						"items": map[string]any{
+							"type": "array",
+							"items": map[string]any{
+								"type":                 "object",
+								"additionalProperties": true,
+							},
+						},
+						"left_items":  nullableStringArray,
+						"right_items": nullableStringArray,
+					},
+				},
+			},
+			"warnings": map[string]any{
+				"type": "array",
+				"items": map[string]any{
+					"type":                 "object",
+					"additionalProperties": false,
+					"required":             []string{"type", "message"},
+					"properties": map[string]any{
+						"type": map[string]any{
+							"type": "string",
+							"enum": []string{
+								"unreadable_text",
+								"unclear_structure",
+								"unsupported_task_type",
+								"other",
+							},
+						},
+						"message": map[string]any{"type": "string"},
+					},
+				},
+			},
+		},
+	}
+}
+
 func systemPrompt(promptVersion string) string {
 	return `You are an educational document extraction engine.
 
 Your task is to analyze an image of a school English assignment and extract its exact structure.
 
-Return only a valid JSON object. Do not wrap it in Markdown. Do not include explanations.
+Return only a valid JSON object matching the response_format JSON Schema. Do not wrap it in Markdown. Do not include explanations.
 
 Important rules:
 - Extract only what is visible in the image.
@@ -321,29 +555,8 @@ Important rules:
 - If structure is unclear, use type "unknown" and add a warning.
 - If answer key is not visible, use null for answers.
 - The assignment subject is English.
-- Return JSON according to this schema:
-{
-  "title": "string|null",
-  "subject": "english",
-  "detected_language": "en|ru|mixed|unknown",
-  "estimated_level": "A1|A2|B1|B2|C1|C2|unknown",
-  "sections": [
-    {
-      "id": "string",
-      "type": "instruction|reading_text|multiple_choice|fill_gap|matching|open_question|unknown",
-      "title": "string|null",
-      "instruction": "string|null",
-      "text": "string|null",
-      "items": []
-    }
-  ],
-  "warnings": [
-    {
-      "type": "unreadable_text|unclear_structure|unsupported_task_type|other",
-      "message": "string"
-    }
-  ]
-}
+- Put per-question details, answer options, gaps, pairs, or answer keys inside section.items objects.
+- For non-matching sections, use null for left_items and right_items.
 
 prompt_version: ` + promptVersion
 }

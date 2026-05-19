@@ -1,6 +1,6 @@
 package extraction
 
-const PromptVersion = "assignment_image_extraction_v1"
+const PromptVersion = "task_processing_pipeline_v1"
 
 var allowedSectionTypes = map[string]struct{}{
 	"instruction":     {},

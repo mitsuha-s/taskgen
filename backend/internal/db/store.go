@@ -42,11 +42,13 @@ type ExtractionRun struct {
 	ID            string          `json:"id"`
 	AssignmentID  string          `json:"assignment_id"`
 	Status        string          `json:"status"`
+	CurrentStep   int             `json:"current_step"`
 	Provider      string          `json:"provider,omitempty"`
 	Model         string          `json:"model,omitempty"`
 	PromptVersion string          `json:"prompt_version,omitempty"`
 	RawResponse   string          `json:"-"`
 	ParsedContent json.RawMessage `json:"parsed_content"`
+	StepResults   json.RawMessage `json:"step_results"`
 	Warnings      json.RawMessage `json:"warnings"`
 	ErrorMessage  string          `json:"error_message,omitempty"`
 	CreatedAt     time.Time       `json:"created_at"`
@@ -193,9 +195,10 @@ func (s *Store) CreateExtractionRun(ctx context.Context, assignmentID, promptVer
 	row := tx.QueryRow(ctx, `
 		INSERT INTO extraction_runs (assignment_id, prompt_version)
 		VALUES ($1, $2)
-		RETURNING id::text, assignment_id::text, status, coalesce(provider, ''),
+		RETURNING id::text, assignment_id::text, status, current_step, coalesce(provider, ''),
 			coalesce(model, ''), coalesce(prompt_version, ''), coalesce(raw_response, ''),
-			coalesce(parsed_content::text, 'null'), coalesce(warnings::text, '[]'),
+			coalesce(parsed_content::text, 'null'), coalesce(step_results::text, '[]'),
+			coalesce(warnings::text, '[]'),
 			coalesce(error_message, ''), created_at, started_at, finished_at
 	`, assignmentID, promptVersion)
 	run, err := scanExtractionRun(row)
@@ -223,6 +226,25 @@ func (s *Store) MarkExtractionRunning(ctx context.Context, id string) error {
 		SET status = 'running', started_at = coalesce(started_at, now())
 		WHERE id = $1
 	`, id)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) MarkExtractionStepRunning(ctx context.Context, id string, step int) error {
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE extraction_runs
+		SET status = 'running',
+			current_step = $2,
+			started_at = coalesce(started_at, now()),
+			finished_at = null,
+			error_message = null
+		WHERE id = $1
+	`, id, step)
 	if err != nil {
 		return err
 	}
@@ -268,6 +290,58 @@ func (s *Store) FinishExtractionSucceeded(ctx context.Context, id, provider, mod
 	return tx.Commit(ctx)
 }
 
+type ExtractionStepFinishInput struct {
+	Status           string
+	AssignmentStatus string
+	Provider         string
+	Model            string
+	PromptVersion    string
+	RawResponse      string
+	CurrentStep      int
+	StepResults      json.RawMessage
+	ParsedContent    json.RawMessage
+	Warnings         json.RawMessage
+}
+
+func (s *Store) FinishExtractionStep(ctx context.Context, id string, input ExtractionStepFinishInput) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	var assignmentID string
+	if err := tx.QueryRow(ctx, `
+		UPDATE extraction_runs
+		SET status = $2,
+			provider = nullif($3, ''),
+			model = nullif($4, ''),
+			prompt_version = $5,
+			raw_response = nullif($6, ''),
+			current_step = $7,
+			step_results = $8::jsonb,
+			parsed_content = $9::jsonb,
+			warnings = $10::jsonb,
+			error_message = null,
+			finished_at = CASE WHEN $2 = 'succeeded' THEN now() ELSE null END
+		WHERE id = $1
+		RETURNING assignment_id::text
+	`, id, input.Status, input.Provider, input.Model, input.PromptVersion, input.RawResponse,
+		input.CurrentStep, string(input.StepResults), string(input.ParsedContent), string(input.Warnings)).Scan(&assignmentID); err != nil {
+		return mapNoRows(err)
+	}
+
+	if _, err := tx.Exec(ctx, `
+		UPDATE assignments
+		SET status = $2
+		WHERE id = $1
+	`, assignmentID, input.AssignmentStatus); err != nil {
+		return err
+	}
+
+	return tx.Commit(ctx)
+}
+
 func (s *Store) FinishExtractionFailed(ctx context.Context, id, provider, model, promptVersion, rawResponse, errorMessage string) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -304,9 +378,10 @@ func (s *Store) FinishExtractionFailed(ctx context.Context, id, provider, model,
 
 func (s *Store) GetExtractionRun(ctx context.Context, id string) (ExtractionRun, error) {
 	row := s.pool.QueryRow(ctx, `
-		SELECT id::text, assignment_id::text, status, coalesce(provider, ''),
+		SELECT id::text, assignment_id::text, status, current_step, coalesce(provider, ''),
 			coalesce(model, ''), coalesce(prompt_version, ''), coalesce(raw_response, ''),
-			coalesce(parsed_content::text, 'null'), coalesce(warnings::text, '[]'),
+			coalesce(parsed_content::text, 'null'), coalesce(step_results::text, '[]'),
+			coalesce(warnings::text, '[]'),
 			coalesce(error_message, ''), created_at, started_at, finished_at
 		FROM extraction_runs
 		WHERE id = $1
@@ -316,9 +391,10 @@ func (s *Store) GetExtractionRun(ctx context.Context, id string) (ExtractionRun,
 
 func (s *Store) GetLatestExtractionRunForAssignment(ctx context.Context, assignmentID string) (ExtractionRun, error) {
 	row := s.pool.QueryRow(ctx, `
-		SELECT id::text, assignment_id::text, status, coalesce(provider, ''),
+		SELECT id::text, assignment_id::text, status, current_step, coalesce(provider, ''),
 			coalesce(model, ''), coalesce(prompt_version, ''), coalesce(raw_response, ''),
-			coalesce(parsed_content::text, 'null'), coalesce(warnings::text, '[]'),
+			coalesce(parsed_content::text, 'null'), coalesce(step_results::text, '[]'),
+			coalesce(warnings::text, '[]'),
 			coalesce(error_message, ''), created_at, started_at, finished_at
 		FROM extraction_runs
 		WHERE assignment_id = $1
@@ -388,16 +464,19 @@ func scanAssignmentImage(row pgx.Row) (AssignmentImage, error) {
 func scanExtractionRun(row pgx.Row) (ExtractionRun, error) {
 	var run ExtractionRun
 	var parsedContent string
+	var stepResults string
 	var warnings string
 	err := row.Scan(
 		&run.ID,
 		&run.AssignmentID,
 		&run.Status,
+		&run.CurrentStep,
 		&run.Provider,
 		&run.Model,
 		&run.PromptVersion,
 		&run.RawResponse,
 		&parsedContent,
+		&stepResults,
 		&warnings,
 		&run.ErrorMessage,
 		&run.CreatedAt,
@@ -408,6 +487,7 @@ func scanExtractionRun(row pgx.Row) (ExtractionRun, error) {
 		return ExtractionRun{}, mapNoRows(err)
 	}
 	run.ParsedContent = json.RawMessage(parsedContent)
+	run.StepResults = json.RawMessage(stepResults)
 	run.Warnings = json.RawMessage(warnings)
 	return run, nil
 }
