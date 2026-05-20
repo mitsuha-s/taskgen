@@ -141,9 +141,22 @@ export const api = {
     request<Assignment>(`/api/assignments/${assignmentId}`),
   getExtractionRun: (runId: string) =>
     request<ExtractionRun>(`/api/extraction-runs/${runId}`),
-  continueExtractionRun: (runId: string) =>
+  continueExtractionRun: (runId: string, finalModel?: 'lite' | 'pro') =>
     request<{ extraction_run_id: string; status: string; next_step: number }>(
       `/api/extraction-runs/${runId}/continue`,
+      {
+        method: 'POST',
+        body: JSON.stringify(finalModel ? { final_model: finalModel } : {}),
+      },
+    ),
+  updateExtractionStep: (runId: string, step: number, content: string) =>
+    request<ExtractionRun>(`/api/extraction-runs/${runId}/steps/${step}`, {
+      method: 'PUT',
+      body: JSON.stringify({ content }),
+    }),
+  regenerateExtractionStep: (runId: string, step: number) =>
+    request<{ extraction_run_id: string; status: string; step: number }>(
+      `/api/extraction-runs/${runId}/steps/${step}/regenerate`,
       { method: 'POST' },
     ),
 };

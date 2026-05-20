@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { AlertCircle, ArrowRight, CheckCircle2, Download, Loader2, RotateCcw } from 'lucide-react';
+import { AlertCircle, ArrowRight, CheckCircle2, Download, Loader2, Plus, RotateCcw, Save, Trash2 } from 'lucide-react';
 import { useRef, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { api, PipelineStepResult, userMessage } from '../lib/api';
@@ -12,6 +12,7 @@ export default function ReviewPage() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const runId = searchParams.get('run');
+  const [finalModel, setFinalModel] = useState<'lite' | 'pro'>('pro');
 
   const assignment = useQuery({
     queryKey: ['assignment', id],
@@ -37,7 +38,20 @@ export default function ReviewPage() {
   });
 
   const continueRun = useMutation({
-    mutationFn: () => api.continueExtractionRun(runId!),
+    mutationFn: (model?: 'lite' | 'pro') => api.continueExtractionRun(runId!, model),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ['extraction-run', runId] });
+    },
+  });
+  const updateStep = useMutation({
+    mutationFn: ({ step, content }: { step: number; content: string }) =>
+      api.updateExtractionStep(runId!, step, content),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ['extraction-run', runId] });
+    },
+  });
+  const regenerateStep = useMutation({
+    mutationFn: (step: number) => api.regenerateExtractionStep(runId!, step),
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ['extraction-run', runId] });
     },
@@ -100,7 +114,22 @@ export default function ReviewPage() {
             Результаты обработки
           </div>
           <div className="space-y-4 p-4">
-            {steps.length > 0 ? <PipelineResults steps={steps} /> : null}
+            {steps.length > 0 ? (
+              <PipelineResults
+                steps={steps}
+                currentStep={data?.current_step ?? 1}
+                canEdit={data?.status === 'awaiting_confirmation' || data?.status === 'succeeded'}
+                processing={updateStep.isPending || continueRun.isPending || regenerateStep.isPending}
+                onSave={(step, content) => updateStep.mutateAsync({ step, content })}
+                onSaveAndContinue={async (step, content) => {
+                  await updateStep.mutateAsync({ step, content });
+                  await continueRun.mutateAsync(step === 3 ? finalModel : undefined);
+                }}
+                finalModel={finalModel}
+                onFinalModelChange={setFinalModel}
+                onRegenerate={(step) => regenerateStep.mutate(step)}
+              />
+            ) : null}
             {isRunning ? <RunningState step={data?.current_step ?? 1} /> : null}
             {data?.status === 'failed' ? (
               <FailedState
@@ -112,8 +141,9 @@ export default function ReviewPage() {
             {canContinue ? (
               <ContinueState
                 step={data.current_step}
-                onContinue={() => continueRun.mutate()}
+                onContinue={() => continueRun.mutate(undefined)}
                 processing={continueRun.isPending}
+                hidden={data.current_step === 2 || data.current_step === 3}
               />
             ) : null}
             {data?.status === 'succeeded' ? (
@@ -132,22 +162,225 @@ export default function ReviewPage() {
   );
 }
 
-function PipelineResults({ steps }: { steps: PipelineStepResult[] }) {
+function PipelineResults({
+  steps,
+  currentStep,
+  canEdit,
+  processing,
+  onSave,
+  onSaveAndContinue,
+  finalModel,
+  onFinalModelChange,
+  onRegenerate,
+}: {
+  steps: PipelineStepResult[];
+  currentStep: number;
+  canEdit: boolean;
+  processing: boolean;
+  onSave: (step: number, content: string) => Promise<unknown>;
+  onSaveAndContinue: (step: number, content: string) => Promise<unknown>;
+  finalModel: 'lite' | 'pro';
+  onFinalModelChange: (value: 'lite' | 'pro') => void;
+  onRegenerate: (step: number) => void;
+}) {
   return (
     <div className="space-y-3">
-      {steps.map((step) => (
-        <article key={`${step.step}-${step.key}`} className="rounded-lg border border-slate-200 bg-white">
-          <div className="flex items-center gap-2 border-b border-slate-200 px-3 py-2">
-            <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-slate-900 text-xs font-semibold text-white">
-              {step.step}
-            </span>
-            <h2 className="text-sm font-semibold text-slate-900">{step.title}</h2>
+      {steps.map((step) => {
+        const isEditableCheckpoint = canEdit && step.step === currentStep && (step.step === 2 || step.step === 3);
+        return (
+          <article key={`${step.step}-${step.key}`} className="rounded-lg border border-slate-200 bg-white">
+            <div className="flex flex-col gap-2 border-b border-slate-200 px-3 py-2 sm:flex-row sm:items-center sm:justify-between">
+              <div className="flex items-center gap-2">
+                <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-slate-900 text-xs font-semibold text-white">
+                  {step.step}
+                </span>
+                <h2 className="text-sm font-semibold text-slate-900">{step.title}</h2>
+              </div>
+              {canEdit ? (
+                <button className="btn-secondary px-3 py-1.5 text-xs" disabled={processing} onClick={() => onRegenerate(step.step)} type="button">
+                  {processing ? <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" /> : <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />}
+                  Перегенерировать
+                </button>
+              ) : null}
+            </div>
+            {isEditableCheckpoint && step.step === 2 ? (
+              <ParameterEditor
+                content={step.content}
+                processing={processing}
+                onSave={(content) => onSave(step.step, content)}
+                onSaveAndContinue={(content) => onSaveAndContinue(step.step, content)}
+              />
+            ) : isEditableCheckpoint && step.step === 3 ? (
+              <VariationEditor
+                content={step.content}
+                processing={processing}
+                finalModel={finalModel}
+                onFinalModelChange={onFinalModelChange}
+                onSave={(content) => onSave(step.step, content)}
+                onSaveAndContinue={(content) => onSaveAndContinue(step.step, content)}
+              />
+            ) : (
+              <pre className="max-h-[420px] overflow-auto whitespace-pre-wrap break-words p-3 text-sm leading-6 text-slate-800">
+                {step.content}
+              </pre>
+            )}
+          </article>
+        );
+      })}
+    </div>
+  );
+}
+
+const subjectOptions = ['*', 'Русский язык', 'Математика', 'Обществознание', 'Информатика и ИКТ', 'География', 'Биология', 'Физика', 'Химия', 'История', 'Литература', 'Иностранные языки'];
+const taskTypeOptions = ['*', 'Множественный выбор (Multiple choice)', 'Альтернативный выбор (True/False)', 'Перекрестный выбор (Matching)', 'Упорядочение (Rearrangement)', 'Заполнение пропусков (Completion)', 'Вставка слова в нужной форме / Трансформация (Transformation)', 'Ответ на вопрос (Answering questions)', 'Перевод (Translation)', 'Диалог / Интервью (Dialogue / Interview)', 'Обсуждение (Discussion)', 'Написание письма / эссе (Letter / Essay writing)', 'Имитация / Кроссворд / языковые игры (Crossword / Language games)'];
+const classOptions = ['*', ...Array.from({ length: 11 }, (_, index) => String(index + 1))];
+const difficultyOptions = ['*', ...Array.from({ length: 10 }, (_, index) => String(index + 1))];
+const variationOptions = [
+  'замена числовых данных (диапазон, тип чисел — целые, десятичные, дроби)',
+  'изменение порядка перечисления (список условий, объектов, действий)',
+  'синонимическая замена неключевых формулировок',
+  'замена контекста (ситуации, примеры) при сохранении логики',
+  'изменение имён, названий, единиц измерения (без изменения сложности)',
+  'перестановка шагов в многошаговой инструкции',
+];
+
+function ParameterEditor({
+  content,
+  processing,
+  onSave,
+  onSaveAndContinue,
+}: {
+  content: string;
+  processing: boolean;
+  onSave: (content: string) => Promise<unknown>;
+  onSaveAndContinue: (content: string) => Promise<unknown>;
+}) {
+  const initial = parseParameters(content);
+  const [subject, setSubject] = useState(initial.subject);
+  const [taskType, setTaskType] = useState(initial.taskType);
+  const [schoolClass, setSchoolClass] = useState(initial.schoolClass);
+  const [difficulty, setDifficulty] = useState(initial.difficulty);
+  const value = formatParameters({ subject, taskType, schoolClass, difficulty });
+
+  return (
+    <div className="space-y-4 p-4">
+      <div className="grid gap-3 sm:grid-cols-2">
+        <SelectField label="Предметная область" value={subject} options={subjectOptions} onChange={setSubject} />
+        <SelectField label="Тип задания" value={taskType} options={taskTypeOptions} onChange={setTaskType} />
+        <SelectField label="Предполагаемый класс" value={schoolClass} options={classOptions} onChange={setSchoolClass} />
+        <SelectField label="Уровень сложности" value={difficulty} options={difficultyOptions} onChange={setDifficulty} />
+      </div>
+      <EditorActions processing={processing} onSave={() => onSave(value)} onSaveAndContinue={() => onSaveAndContinue(value)} />
+    </div>
+  );
+}
+
+function VariationEditor({
+  content,
+  processing,
+  finalModel,
+  onFinalModelChange,
+  onSave,
+  onSaveAndContinue,
+}: {
+  content: string;
+  processing: boolean;
+  finalModel: 'lite' | 'pro';
+  onFinalModelChange: (value: 'lite' | 'pro') => void;
+  onSave: (content: string) => Promise<unknown>;
+  onSaveAndContinue: (content: string) => Promise<unknown>;
+}) {
+  const initial = parseVariationContent(content);
+  const [selected, setSelected] = useState<string[]>(initial.rules);
+  const [custom, setCustom] = useState('');
+  const [comment, setComment] = useState(initial.comment);
+  const value = formatVariationContent(selected, comment);
+
+  function toggle(rule: string) {
+    setSelected((current) => current.includes(rule) ? current.filter((item) => item !== rule) : [...current, rule]);
+  }
+
+  function addCustom() {
+    const next = custom.trim();
+    if (!next || selected.includes(next)) {
+      setCustom('');
+      return;
+    }
+    setSelected((current) => [...current, next]);
+    setCustom('');
+  }
+
+  return (
+    <div className="space-y-4 p-4">
+      <div className="space-y-2">
+        {variationOptions.map((rule) => (
+          <label key={rule} className="flex items-start gap-2 rounded-md border border-slate-200 bg-slate-50 p-3 text-sm text-slate-800">
+            <input className="mt-1" type="checkbox" checked={selected.includes(rule)} onChange={() => toggle(rule)} />
+            <span>{rule}</span>
+          </label>
+        ))}
+      </div>
+      <div className="space-y-2">
+        {selected.filter((rule) => !variationOptions.includes(rule)).map((rule) => (
+          <div key={rule} className="flex items-center justify-between gap-3 rounded-md border border-slate-200 px-3 py-2 text-sm">
+            <span>{rule}</span>
+            <button className="btn-secondary px-2 py-1" type="button" onClick={() => toggle(rule)}>
+              <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
+            </button>
           </div>
-          <pre className="max-h-[420px] overflow-auto whitespace-pre-wrap break-words p-3 text-sm leading-6 text-slate-800">
-            {step.content}
-          </pre>
-        </article>
-      ))}
+        ))}
+        <div className="flex gap-2">
+          <input className="field" value={custom} onChange={(event) => setCustom(event.target.value)} placeholder="Добавить свое допустимое изменение" />
+          <button className="btn-secondary" type="button" onClick={addCustom}>
+            <Plus className="h-4 w-4" aria-hidden="true" />
+          </button>
+        </div>
+      </div>
+      <div className="space-y-1.5">
+        <label className="label" htmlFor="variation-comment">Комментарий к генерации</label>
+        <textarea id="variation-comment" className="field min-h-24" value={comment} onChange={(event) => setComment(event.target.value)} placeholder="Например: сохранить формат ответов, не менять количество пунктов" />
+      </div>
+      <div className="space-y-1.5">
+        <label className="label" htmlFor="final-model">Модель для шага 4 (финальный вариант)</label>
+        <select
+          id="final-model"
+          className="field"
+          value={finalModel}
+          onChange={(event) => onFinalModelChange(event.target.value as 'lite' | 'pro')}
+        >
+          <option value="pro">Pro</option>
+          <option value="lite">Lite</option>
+        </select>
+      </div>
+      <EditorActions processing={processing} onSave={() => onSave(value)} onSaveAndContinue={() => onSaveAndContinue(value)} />
+    </div>
+  );
+}
+
+function SelectField({ label, value, options, onChange }: { label: string; value: string; options: string[]; onChange: (value: string) => void }) {
+  return (
+    <label className="space-y-1.5">
+      <span className="label">{label}</span>
+      <select className="field" value={value} onChange={(event) => onChange(event.target.value)}>
+        {options.map((option) => (
+          <option key={option} value={option}>{option}</option>
+        ))}
+      </select>
+    </label>
+  );
+}
+
+function EditorActions({ processing, onSave, onSaveAndContinue }: { processing: boolean; onSave: () => void; onSaveAndContinue: () => void }) {
+  return (
+    <div className="flex flex-col gap-2 sm:flex-row">
+      <button className="btn-secondary" disabled={processing} onClick={onSave} type="button">
+        {processing ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" /> : <Save className="h-4 w-4" aria-hidden="true" />}
+        Сохранить
+      </button>
+      <button className="btn-primary" disabled={processing} onClick={onSaveAndContinue} type="button">
+        {processing ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" /> : <ArrowRight className="h-4 w-4" aria-hidden="true" />}
+        Сохранить и продолжить
+      </button>
     </div>
   );
 }
@@ -161,7 +394,10 @@ function RunningState({ step }: { step: number }) {
   );
 }
 
-function ContinueState({ step, onContinue, processing }: { step: number; onContinue: () => void; processing: boolean }) {
+function ContinueState({ step, onContinue, processing, hidden }: { step: number; onContinue: () => void; processing: boolean; hidden?: boolean }) {
+  if (hidden) {
+    return null;
+  }
   return (
     <div className="space-y-3 rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-950">
       <div className="font-medium">Шаг {step} завершен. Проверьте промежуточный результат перед продолжением.</div>
@@ -392,6 +628,54 @@ function safeFilename(value: string) {
     .replace(/\s+/g, ' ')
     .slice(0, 80);
   return normalized || 'assignment-variant';
+}
+
+function parseParameters(content: string) {
+  const get = (label: string) => {
+    const line = content.split(/\r?\n/).find((item) => item.toLowerCase().startsWith(label.toLowerCase()));
+    return line?.slice(label.length).replace(/^:\s*/, '').trim() || '*';
+  };
+  return {
+    subject: normalizeOption(get('Предметная область'), subjectOptions),
+    taskType: normalizeOption(get('Тип задания'), taskTypeOptions),
+    schoolClass: normalizeOption(get('Предполагаемый класс'), classOptions),
+    difficulty: normalizeOption(get('Уровень сложности задания'), difficultyOptions),
+  };
+}
+
+function normalizeOption(value: string, options: string[]) {
+  if (options.includes(value)) {
+    return value;
+  }
+  return '*';
+}
+
+function formatParameters(values: { subject: string; taskType: string; schoolClass: string; difficulty: string }) {
+  return [
+    `Предметная область: ${values.subject}`,
+    `Тип задания: ${values.taskType}`,
+    `Предполагаемый класс: ${values.schoolClass}`,
+    `Уровень сложности задания: ${values.difficulty}`,
+  ].join('\n');
+}
+
+function parseVariationContent(content: string) {
+  const [rulesText, commentText = ''] = content.split(/\n+Комментарий пользователя:\s*/i);
+  const rules = rulesText
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean);
+  return {
+    rules: rules.length > 0 ? rules : variationOptions.slice(0, 1),
+    comment: commentText.trim(),
+  };
+}
+
+function formatVariationContent(rules: string[], comment: string) {
+  const uniqueRules = Array.from(new Set(rules.map((rule) => rule.trim()).filter(Boolean)));
+  const base = uniqueRules.length > 0 ? uniqueRules.join(', ') : '-';
+  const cleanComment = comment.trim();
+  return cleanComment ? `${base}\n\nКомментарий пользователя:\n${cleanComment}` : base;
 }
 
 function statusLabel(status: string) {

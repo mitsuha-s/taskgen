@@ -47,6 +47,7 @@ func main() {
 		Name:              cfg.LLMProvider,
 		GigaChatAuthKey:   cfg.GigaChatAuthKey,
 		GigaChatModel:     cfg.GigaChatModel,
+		GigaChatTextModel: cfg.GigaChatTextModel,
 		GigaChatScope:     cfg.GigaChatScope,
 		GigaChatAuthURL:   cfg.GigaChatAuthURL,
 		GigaChatAPIBase:   cfg.GigaChatAPIBase,

@@ -342,6 +342,39 @@ func (s *Store) FinishExtractionStep(ctx context.Context, id string, input Extra
 	return tx.Commit(ctx)
 }
 
+func (s *Store) UpdateExtractionStepResults(ctx context.Context, id string, status, assignmentStatus string, currentStep int, stepResults, parsedContent json.RawMessage) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	var assignmentID string
+	if err := tx.QueryRow(ctx, `
+		UPDATE extraction_runs
+		SET status = $2,
+			current_step = $3,
+			step_results = $4::jsonb,
+			parsed_content = $5::jsonb,
+			error_message = null,
+			finished_at = CASE WHEN $2 = 'succeeded' THEN now() ELSE null END
+		WHERE id = $1
+		RETURNING assignment_id::text
+	`, id, status, currentStep, string(stepResults), string(parsedContent)).Scan(&assignmentID); err != nil {
+		return mapNoRows(err)
+	}
+
+	if _, err := tx.Exec(ctx, `
+		UPDATE assignments
+		SET status = $2
+		WHERE id = $1
+	`, assignmentID, assignmentStatus); err != nil {
+		return err
+	}
+
+	return tx.Commit(ctx)
+}
+
 func (s *Store) FinishExtractionFailed(ctx context.Context, id, provider, model, promptVersion, rawResponse, errorMessage string) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {

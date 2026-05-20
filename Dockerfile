@@ -21,6 +21,8 @@ RUN adduser -D -H app \
 COPY --from=backend-builder /out/api /app/api
 COPY --from=backend-builder /src/backend/migrations /app/migrations
 COPY --from=frontend-builder /src/frontend/dist /app/frontend/dist
+RUN chown -R app:app /app/api /app/frontend /app/migrations \
+    && chmod -R u=rwX,go=rX /app/api /app/frontend /app/migrations
 ENV HTTP_ADDR=:8080 \
     FRONTEND_DIST_DIR=/app/frontend/dist \
     MIGRATIONS_DIR=/app/migrations \

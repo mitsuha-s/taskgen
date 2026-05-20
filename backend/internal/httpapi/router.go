@@ -59,6 +59,8 @@ func NewRouter(cfg config.Config, store *db.Store, authService *auth.Service, st
 			r.Post("/assignments/{assignmentID}/extract", server.startExtraction)
 			r.Get("/extraction-runs/{runID}", server.getExtractionRun)
 			r.Post("/extraction-runs/{runID}/continue", server.continueExtractionRun)
+			r.Put("/extraction-runs/{runID}/steps/{step}", server.updateExtractionStep)
+			r.Post("/extraction-runs/{runID}/steps/{step}/regenerate", server.regenerateExtractionStep)
 			r.Get("/files/assignments/{assignmentID}/original", server.serveAssignmentImage)
 		})
 	})

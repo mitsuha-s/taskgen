@@ -27,6 +27,7 @@ type ConvertAssignmentImageToMarkdownRequest struct {
 type GenerateAssignmentTextRequest struct {
 	Prompt        string
 	PromptVersion string
+	Model         string
 }
 
 type AnalyzeAssignmentImageResponse struct {
@@ -47,6 +48,7 @@ type ProviderConfig struct {
 	Name              string
 	GigaChatAuthKey   string
 	GigaChatModel     string
+	GigaChatTextModel string
 	GigaChatScope     string
 	GigaChatAuthURL   string
 	GigaChatAPIBase   string
@@ -60,6 +62,7 @@ func NewProvider(cfg ProviderConfig) VisionProvider {
 		return NewGigaChatProvider(GigaChatConfig{
 			AuthKey:   cfg.GigaChatAuthKey,
 			Model:     cfg.GigaChatModel,
+			TextModel: cfg.GigaChatTextModel,
 			Scope:     cfg.GigaChatScope,
 			AuthURL:   cfg.GigaChatAuthURL,
 			APIBase:   cfg.GigaChatAPIBase,

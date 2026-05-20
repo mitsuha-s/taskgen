@@ -23,6 +23,7 @@ import (
 type GigaChatConfig struct {
 	AuthKey   string
 	Model     string
+	TextModel string
 	Scope     string
 	AuthURL   string
 	APIBase   string
@@ -31,12 +32,13 @@ type GigaChatConfig struct {
 }
 
 type GigaChatProvider struct {
-	authKey string
-	model   string
-	scope   string
-	authURL string
-	apiBase string
-	client  *http.Client
+	authKey     string
+	visionModel string
+	textModel   string
+	scope       string
+	authURL     string
+	apiBase     string
+	client      *http.Client
 
 	mu          sync.Mutex
 	accessToken string
@@ -47,6 +49,10 @@ func NewGigaChatProvider(cfg GigaChatConfig) *GigaChatProvider {
 	model := cfg.Model
 	if model == "" {
 		model = "GigaChat-Pro"
+	}
+	textModel := cfg.TextModel
+	if textModel == "" {
+		textModel = model
 	}
 	scope := cfg.Scope
 	if scope == "" {
@@ -72,12 +78,13 @@ func NewGigaChatProvider(cfg GigaChatConfig) *GigaChatProvider {
 	}
 
 	return &GigaChatProvider{
-		authKey: cfg.AuthKey,
-		model:   model,
-		scope:   scope,
-		authURL: authURL,
-		apiBase: apiBase,
-		client:  &http.Client{Timeout: time.Duration(timeout) * time.Second, Transport: transport},
+		authKey:     cfg.AuthKey,
+		visionModel: model,
+		textModel:   textModel,
+		scope:       scope,
+		authURL:     authURL,
+		apiBase:     apiBase,
+		client:      &http.Client{Timeout: time.Duration(timeout) * time.Second, Transport: transport},
 	}
 }
 
@@ -85,13 +92,13 @@ func (p *GigaChatProvider) AnalyzeAssignmentImage(ctx context.Context, req Analy
 	if strings.TrimSpace(p.authKey) == "" {
 		return &AnalyzeAssignmentImageResponse{
 			Provider: "gigachat",
-			Model:    p.model,
+			Model:    p.visionModel,
 		}, ErrProviderNotConfigured
 	}
 	if req.MimeType == "image/webp" {
 		return &AnalyzeAssignmentImageResponse{
 			Provider: "gigachat",
-			Model:    p.model,
+			Model:    p.visionModel,
 		}, errors.New("GigaChat image upload supports jpeg/png/tiff/bmp; webp is not supported")
 	}
 
@@ -99,7 +106,7 @@ func (p *GigaChatProvider) AnalyzeAssignmentImage(ctx context.Context, req Analy
 	if err != nil {
 		return &AnalyzeAssignmentImageResponse{
 			Provider: "gigachat",
-			Model:    p.model,
+			Model:    p.visionModel,
 		}, err
 	}
 
@@ -108,7 +115,7 @@ func (p *GigaChatProvider) AnalyzeAssignmentImage(ctx context.Context, req Analy
 		return &AnalyzeAssignmentImageResponse{
 			RawResponse: uploadRaw,
 			Provider:    "gigachat",
-			Model:       p.model,
+			Model:       p.visionModel,
 		}, err
 	}
 
@@ -117,7 +124,7 @@ func (p *GigaChatProvider) AnalyzeAssignmentImage(ctx context.Context, req Analy
 		return &AnalyzeAssignmentImageResponse{
 			RawResponse: chatRaw,
 			Provider:    "gigachat",
-			Model:       p.model,
+			Model:       p.visionModel,
 		}, err
 	}
 
@@ -126,7 +133,7 @@ func (p *GigaChatProvider) AnalyzeAssignmentImage(ctx context.Context, req Analy
 		return &AnalyzeAssignmentImageResponse{
 			RawResponse: chatRaw,
 			Provider:    "gigachat",
-			Model:       p.model,
+			Model:       p.visionModel,
 		}, err
 	}
 
@@ -134,7 +141,7 @@ func (p *GigaChatProvider) AnalyzeAssignmentImage(ctx context.Context, req Analy
 		RawResponse: chatRaw,
 		ParsedJSON:  parsed,
 		Provider:    "gigachat",
-		Model:       p.model,
+		Model:       p.visionModel,
 	}, nil
 }
 
@@ -142,13 +149,13 @@ func (p *GigaChatProvider) ConvertAssignmentImageToMarkdown(ctx context.Context,
 	if strings.TrimSpace(p.authKey) == "" {
 		return &TextGenerationResponse{
 			Provider: "gigachat",
-			Model:    p.model,
+			Model:    p.visionModel,
 		}, ErrProviderNotConfigured
 	}
 	if req.MimeType == "image/webp" {
 		return &TextGenerationResponse{
 			Provider: "gigachat",
-			Model:    p.model,
+			Model:    p.visionModel,
 		}, errors.New("GigaChat image upload supports jpeg/png/tiff/bmp; webp is not supported")
 	}
 
@@ -156,7 +163,7 @@ func (p *GigaChatProvider) ConvertAssignmentImageToMarkdown(ctx context.Context,
 	if err != nil {
 		return &TextGenerationResponse{
 			Provider: "gigachat",
-			Model:    p.model,
+			Model:    p.visionModel,
 		}, err
 	}
 
@@ -165,11 +172,11 @@ func (p *GigaChatProvider) ConvertAssignmentImageToMarkdown(ctx context.Context,
 		return &TextGenerationResponse{
 			RawResponse: uploadRaw,
 			Provider:    "gigachat",
-			Model:       p.model,
+			Model:       p.visionModel,
 		}, err
 	}
 
-	raw, content, err := p.chatText(ctx, token, []map[string]any{
+	raw, content, err := p.chatText(ctx, token, p.visionModel, []map[string]any{
 		{
 			"role":    "system",
 			"content": "You convert school assignment images into faithful markdown. Return only the requested content.",
@@ -184,7 +191,7 @@ func (p *GigaChatProvider) ConvertAssignmentImageToMarkdown(ctx context.Context,
 		return &TextGenerationResponse{
 			RawResponse: raw,
 			Provider:    "gigachat",
-			Model:       p.model,
+			Model:       p.visionModel,
 		}, err
 	}
 
@@ -192,15 +199,20 @@ func (p *GigaChatProvider) ConvertAssignmentImageToMarkdown(ctx context.Context,
 		RawResponse: raw,
 		Content:     content,
 		Provider:    "gigachat",
-		Model:       p.model,
+		Model:       p.visionModel,
 	}, nil
 }
 
 func (p *GigaChatProvider) GenerateAssignmentText(ctx context.Context, req GenerateAssignmentTextRequest) (*TextGenerationResponse, error) {
+	model := strings.TrimSpace(req.Model)
+	if model == "" {
+		model = p.textModel
+	}
+
 	if strings.TrimSpace(p.authKey) == "" {
 		return &TextGenerationResponse{
 			Provider: "gigachat",
-			Model:    p.model,
+			Model:    model,
 		}, ErrProviderNotConfigured
 	}
 
@@ -208,11 +220,11 @@ func (p *GigaChatProvider) GenerateAssignmentText(ctx context.Context, req Gener
 	if err != nil {
 		return &TextGenerationResponse{
 			Provider: "gigachat",
-			Model:    p.model,
+			Model:    model,
 		}, err
 	}
 
-	raw, content, err := p.chatText(ctx, token, []map[string]any{
+	raw, content, err := p.chatText(ctx, token, model, []map[string]any{
 		{
 			"role":    "system",
 			"content": "You process school assignments according to the user instructions. Return only the requested content.",
@@ -226,7 +238,7 @@ func (p *GigaChatProvider) GenerateAssignmentText(ctx context.Context, req Gener
 		return &TextGenerationResponse{
 			RawResponse: raw,
 			Provider:    "gigachat",
-			Model:       p.model,
+			Model:       model,
 		}, err
 	}
 
@@ -234,7 +246,7 @@ func (p *GigaChatProvider) GenerateAssignmentText(ctx context.Context, req Gener
 		RawResponse: raw,
 		Content:     content,
 		Provider:    "gigachat",
-		Model:       p.model,
+		Model:       model,
 	}, nil
 }
 
@@ -346,7 +358,7 @@ func (p *GigaChatProvider) uploadFile(ctx context.Context, token, imagePath, mim
 
 func (p *GigaChatProvider) chat(ctx context.Context, token, fileID, promptVersion string) (string, string, error) {
 	payload := map[string]any{
-		"model":           p.model,
+		"model":           p.visionModel,
 		"temperature":     0.1,
 		"stream":          false,
 		"response_format": assignmentResponseFormat(),
@@ -366,9 +378,9 @@ func (p *GigaChatProvider) chat(ctx context.Context, token, fileID, promptVersio
 	return p.chatCompletion(ctx, token, payload)
 }
 
-func (p *GigaChatProvider) chatText(ctx context.Context, token string, messages []map[string]any) (string, string, error) {
+func (p *GigaChatProvider) chatText(ctx context.Context, token, model string, messages []map[string]any) (string, string, error) {
 	payload := map[string]any{
-		"model":       p.model,
+		"model":       model,
 		"temperature": 0.2,
 		"stream":      false,
 		"messages":    messages,

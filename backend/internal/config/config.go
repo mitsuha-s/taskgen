@@ -20,6 +20,7 @@ type Config struct {
 	LLMProvider       string
 	GigaChatAuthKey   string
 	GigaChatModel     string
+	GigaChatTextModel string
 	GigaChatScope     string
 	GigaChatAuthURL   string
 	GigaChatAPIBase   string
@@ -47,6 +48,7 @@ func Load() Config {
 		LLMProvider:       env("LLM_PROVIDER", "mock"),
 		GigaChatAuthKey:   env("GIGACHAT_AUTH_KEY", env("GIGACHAT_API_KEY", "")),
 		GigaChatModel:     env("GIGACHAT_MODEL", "GigaChat-Pro"),
+		GigaChatTextModel: env("GIGACHAT_TEXT_MODEL", ""),
 		GigaChatScope:     env("GIGACHAT_SCOPE", "GIGACHAT_API_PERS"),
 		GigaChatAuthURL:   env("GIGACHAT_AUTH_URL", env("GIGACHAT_OAUTH_URL", "https://ngw.devices.sberbank.ru:9443/api/v2/oauth")),
 		GigaChatAPIBase:   gigachatAPIBase(),

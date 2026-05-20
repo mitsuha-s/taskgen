@@ -17,12 +17,18 @@ import (
 const totalPipelineSteps = 4
 
 var ErrPipelineNotReady = errors.New("pipeline is not waiting for confirmation")
+var ErrInvalidPipelineStep = errors.New("invalid pipeline step")
+var ErrInvalidFinalModel = errors.New("invalid final model")
 
 type Service struct {
 	store    *db.Store
 	storage  *files.LocalStorage
 	provider llm.VisionProvider
 	logger   *slog.Logger
+}
+
+type ContinueOptions struct {
+	FinalModel string
 }
 
 type pipelineStepResult struct {
@@ -55,11 +61,11 @@ func (s *Service) Start(ctx context.Context, assignmentID string) (db.Extraction
 		return db.ExtractionRun{}, err
 	}
 
-	go s.executeStep(run.ID, 1)
+	go s.executeStep(run.ID, 1, "")
 	return run, nil
 }
 
-func (s *Service) Continue(ctx context.Context, runID string) (db.ExtractionRun, error) {
+func (s *Service) Continue(ctx context.Context, runID string, options ContinueOptions) (db.ExtractionRun, error) {
 	run, err := s.store.GetExtractionRun(ctx, runID)
 	if err != nil {
 		return db.ExtractionRun{}, err
@@ -73,11 +79,87 @@ func (s *Service) Continue(ctx context.Context, runID string) (db.ExtractionRun,
 		return db.ExtractionRun{}, err
 	}
 
-	go s.executeStep(run.ID, nextStep)
+	finalModel, err := resolveFinalModel(options.FinalModel)
+	if err != nil {
+		return db.ExtractionRun{}, err
+	}
+	go s.executeStep(run.ID, nextStep, finalModel)
 	return run, nil
 }
 
-func (s *Service) executeStep(runID string, step int) {
+func (s *Service) Regenerate(ctx context.Context, runID string, step int) (db.ExtractionRun, error) {
+	if step < 1 || step > totalPipelineSteps {
+		return db.ExtractionRun{}, ErrInvalidPipelineStep
+	}
+	run, err := s.store.GetExtractionRun(ctx, runID)
+	if err != nil {
+		return db.ExtractionRun{}, err
+	}
+	if run.Status == "pending" || run.Status == "running" {
+		return db.ExtractionRun{}, ErrPipelineNotReady
+	}
+	results := keepPipelineResultsBefore(parsePipelineResults(run.StepResults), step)
+	content := buildPipelineContent(results)
+	parsedContent, err := json.Marshal(content)
+	if err != nil {
+		return db.ExtractionRun{}, err
+	}
+	stepResults, err := json.Marshal(results)
+	if err != nil {
+		return db.ExtractionRun{}, err
+	}
+	if err := s.store.UpdateExtractionStepResults(ctx, runID, "running", "extracting", step, stepResults, parsedContent); err != nil {
+		return db.ExtractionRun{}, err
+	}
+	go s.executeStep(run.ID, step, "")
+	return run, nil
+}
+
+func (s *Service) UpdateStep(ctx context.Context, runID string, step int, content string) (db.ExtractionRun, error) {
+	if step < 1 || step > totalPipelineSteps {
+		return db.ExtractionRun{}, ErrInvalidPipelineStep
+	}
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return db.ExtractionRun{}, ErrInvalidPipelineStep
+	}
+	run, err := s.store.GetExtractionRun(ctx, runID)
+	if err != nil {
+		return db.ExtractionRun{}, err
+	}
+	if run.Status == "pending" || run.Status == "running" {
+		return db.ExtractionRun{}, ErrPipelineNotReady
+	}
+
+	results := keepPipelineResultsBefore(parsePipelineResults(run.StepResults), step)
+	results = append(results, pipelineStepResult{
+		Step:      step,
+		Key:       pipelineStepKey(step),
+		Title:     pipelineStepTitle(step),
+		Content:   content,
+		CreatedAt: time.Now().UTC().Format(time.RFC3339),
+	})
+	status := "awaiting_confirmation"
+	assignmentStatus := "processing_waiting"
+	if step == totalPipelineSteps {
+		status = "succeeded"
+		assignmentStatus = "processed"
+	}
+	parsedContent, err := json.Marshal(buildPipelineContent(results))
+	if err != nil {
+		return db.ExtractionRun{}, err
+	}
+	stepResults, err := json.Marshal(results)
+	if err != nil {
+		return db.ExtractionRun{}, err
+	}
+	if err := s.store.UpdateExtractionStepResults(ctx, runID, status, assignmentStatus, step, stepResults, parsedContent); err != nil {
+		return db.ExtractionRun{}, err
+	}
+	return s.store.GetExtractionRun(ctx, runID)
+}
+
+func (s *Service) executeStep(runID string, step int, finalModel string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
 	defer cancel()
 
@@ -93,7 +175,7 @@ func (s *Service) executeStep(runID string, step int) {
 	}
 
 	results := parsePipelineResults(run.StepResults)
-	resp, result, input, err := s.runStep(ctx, run, step, results)
+	resp, result, input, err := s.runStep(ctx, run, step, results, finalModel)
 	if err != nil {
 		provider, model := providerMeta(resp)
 		rawResponse := ""
@@ -164,7 +246,7 @@ func (s *Service) executeStep(runID string, step int) {
 	}
 }
 
-func (s *Service) runStep(ctx context.Context, run db.ExtractionRun, step int, results []pipelineStepResult) (*llm.TextGenerationResponse, pipelineStepResult, json.RawMessage, error) {
+func (s *Service) runStep(ctx context.Context, run db.ExtractionRun, step int, results []pipelineStepResult, finalModel string) (*llm.TextGenerationResponse, pipelineStepResult, json.RawMessage, error) {
 	var (
 		resp *llm.TextGenerationResponse
 		err  error
@@ -228,6 +310,7 @@ func (s *Service) runStep(ctx context.Context, run db.ExtractionRun, step int, r
 		resp, err = s.provider.GenerateAssignmentText(ctx, llm.GenerateAssignmentTextRequest{
 			Prompt:        prompt,
 			PromptVersion: PromptVersion,
+			Model:         finalModel,
 		})
 	default:
 		return nil, pipelineStepResult{}, mustJSON(input), fmt.Errorf("unsupported pipeline step %d", step)
@@ -281,6 +364,30 @@ func resultContent(results []pipelineStepResult, key string) string {
 		}
 	}
 	return ""
+}
+
+func keepPipelineResultsBefore(results []pipelineStepResult, step int) []pipelineStepResult {
+	kept := make([]pipelineStepResult, 0, len(results))
+	for _, result := range results {
+		if result.Step < step {
+			kept = append(kept, result)
+		}
+	}
+	return kept
+}
+
+func resolveFinalModel(option string) (string, error) {
+	selected := strings.ToLower(strings.TrimSpace(option))
+	switch selected {
+	case "":
+		return "", nil
+	case "pro":
+		return "GigaChat-Pro", nil
+	case "lite":
+		return "GigaChat-2", nil
+	default:
+		return "", ErrInvalidFinalModel
+	}
 }
 
 func pipelineStepKey(step int) string {
