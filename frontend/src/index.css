@@ -4,7 +4,10 @@
 
 :root {
   color: #172033;
-  background: #f7f8fb;
+  background:
+    radial-gradient(circle at top left, rgba(255, 138, 122, 0.34), transparent 30rem),
+    radial-gradient(circle at top right, rgba(84, 179, 196, 0.26), transparent 28rem),
+    linear-gradient(135deg, #fff7ed 0%, #f7f5ff 44%, #e9fbff 100%);
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
@@ -15,31 +18,103 @@ body {
   margin: 0;
   min-width: 320px;
   min-height: 100vh;
+  background:
+    radial-gradient(circle at 8% 2%, rgba(255, 138, 122, 0.34), transparent 24rem),
+    radial-gradient(circle at 84% 0%, rgba(38, 111, 133, 0.22), transparent 30rem),
+    radial-gradient(circle at 50% 100%, rgba(255, 207, 112, 0.2), transparent 30rem),
+    linear-gradient(145deg, #fff7ed 0%, #f7f5ff 46%, #e9fbff 100%);
 }
 
 button,
-input {
+input,
+select,
+textarea {
   font: inherit;
 }
 
 @layer components {
   .btn-primary {
-    @apply inline-flex h-10 items-center justify-center gap-2 rounded-md bg-ink px-4 text-sm font-medium text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60;
+    @apply inline-flex h-10 items-center justify-center gap-2 rounded-md bg-[linear-gradient(135deg,#266f85,#5b7cfa_52%,#ff8a7a)] px-4 text-sm font-semibold text-white shadow-[0_12px_30px_rgba(38,111,133,0.22)] transition hover:brightness-105 disabled:cursor-not-allowed disabled:opacity-60;
   }
 
   .btn-secondary {
-    @apply inline-flex h-10 items-center justify-center gap-2 rounded-md border border-slate-300 bg-white px-4 text-sm font-medium text-slate-800 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60;
+    @apply inline-flex h-10 items-center justify-center gap-2 rounded-md border border-white/80 bg-[linear-gradient(135deg,rgba(255,255,255,0.96),rgba(231,229,255,0.72))] px-4 text-sm font-semibold text-slate-800 shadow-sm transition hover:border-leaf/30 hover:brightness-105 disabled:cursor-not-allowed disabled:opacity-60;
   }
 
   .field {
-    @apply h-10 w-full rounded-md border border-slate-300 bg-white px-3 text-sm outline-none transition placeholder:text-slate-400 focus:border-cyan-700 focus:ring-2 focus:ring-cyan-100;
+    @apply h-10 w-full rounded-md border border-white/80 bg-white/95 px-3 text-sm outline-none shadow-sm transition placeholder:text-slate-400 focus:border-leaf focus:ring-2 focus:ring-leaf/15;
   }
 
   .label {
-    @apply text-sm font-medium text-slate-800;
+    @apply text-sm font-semibold text-slate-800;
   }
 
   .panel {
-    @apply rounded-lg border border-slate-200 bg-white shadow-sm;
+    @apply rounded-lg border border-white/80 bg-[linear-gradient(145deg,rgba(255,255,255,0.94),rgba(247,245,255,0.84)_48%,rgba(233,251,255,0.76))] shadow-[0_18px_48px_rgba(23,32,51,0.09)] backdrop-blur;
   }
+
+  .soft-panel {
+    @apply rounded-lg border border-white/70 bg-[linear-gradient(135deg,rgba(255,255,255,0.8),rgba(231,229,255,0.6))] shadow-sm;
+  }
+
+  .section-title {
+    @apply border-b border-white/80 bg-[linear-gradient(90deg,rgba(255,255,255,0.95),rgba(231,229,255,0.66),rgba(223,247,255,0.66))] px-4 py-3 text-sm font-semibold text-slate-900;
+  }
+}
+
+.document-html {
+  color: #172033;
+  line-height: 1.7;
+}
+
+.document-html h1,
+.document-html h2,
+.document-html h3 {
+  color: #172033;
+  font-weight: 750;
+  line-height: 1.25;
+  margin: 0 0 0.8rem;
+}
+
+.document-html h1 {
+  font-size: 1.35rem;
+}
+
+.document-html h2 {
+  font-size: 1.15rem;
+}
+
+.document-html p,
+.document-html ol,
+.document-html ul,
+.document-html table {
+  margin: 0 0 0.9rem;
+}
+
+.document-html ol,
+.document-html ul {
+  padding-left: 1.35rem;
+}
+
+.document-html li {
+  margin: 0.25rem 0;
+}
+
+.document-html table {
+  width: 100%;
+  border-collapse: collapse;
+  overflow: hidden;
+  border-radius: 0.5rem;
+}
+
+.document-html th,
+.document-html td {
+  border: 1px solid #d7ded8;
+  padding: 0.55rem 0.65rem;
+  text-align: left;
+}
+
+.document-html th {
+  background: linear-gradient(135deg, #f8f7ff, #e9fbff);
+  font-weight: 700;
 }

@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -15,10 +17,15 @@ import (
 )
 
 const totalPipelineSteps = 4
+const generationStep = 3
+const evaluationStep = 4
+
+var scorePattern = regexp.MustCompile(`\b(10|[1-9])\b`)
 
 var ErrPipelineNotReady = errors.New("pipeline is not waiting for confirmation")
 var ErrInvalidPipelineStep = errors.New("invalid pipeline step")
 var ErrInvalidFinalModel = errors.New("invalid final model")
+var ErrInvalidVariantCount = errors.New("invalid variant count")
 
 type Service struct {
 	store    *db.Store
@@ -28,7 +35,14 @@ type Service struct {
 }
 
 type ContinueOptions struct {
-	FinalModel string
+	FinalModel   string
+	VariantCount int
+	StepModel    string
+}
+
+type StartOptions struct {
+	UseDefaultSource bool
+	StepModel        string
 }
 
 type pipelineStepResult struct {
@@ -40,20 +54,46 @@ type pipelineStepResult struct {
 }
 
 type pipelineContent struct {
-	Markdown        string               `json:"markdown,omitempty"`
+	SourceHTML      string               `json:"source_html,omitempty"`
 	Parameters      string               `json:"parameters,omitempty"`
-	VariationRules  string               `json:"variation_rules,omitempty"`
-	VariantMarkdown string               `json:"variant_markdown,omitempty"`
+	VariantHTML     string               `json:"variant_html,omitempty"`
+	VariantsHTML    []string             `json:"variants_html,omitempty"`
+	SelectedVariant int                  `json:"selected_variant,omitempty"`
+	SelfScore       string               `json:"self_score,omitempty"`
+	UsedDefaultHTML bool                 `json:"used_default_html,omitempty"`
 	Steps           []pipelineStepResult `json:"steps"`
+}
+
+type taskParameters struct {
+	TaskNumber  int    `json:"task_number"`
+	Heading     string `json:"heading"`
+	TaskType    string `json:"task_type"`
+	SchoolClass string `json:"school_class"`
+	Difficulty  string `json:"difficulty"`
+}
+
+type parameterBundle struct {
+	Tasks       []taskParameters `json:"tasks"`
+	UserComment string           `json:"user_comment,omitempty"`
+}
+
+type taskSection struct {
+	Number  int
+	Heading string
+	HTML    string
+	Start   int
+	End     int
 }
 
 func NewService(store *db.Store, storage *files.LocalStorage, provider llm.VisionProvider, logger *slog.Logger) *Service {
 	return &Service{store: store, storage: storage, provider: provider, logger: logger}
 }
 
-func (s *Service) Start(ctx context.Context, assignmentID string) (db.ExtractionRun, error) {
-	if _, err := s.store.GetImageByAssignmentID(ctx, assignmentID); err != nil {
-		return db.ExtractionRun{}, err
+func (s *Service) Start(ctx context.Context, assignmentID string, options StartOptions) (db.ExtractionRun, error) {
+	if !options.UseDefaultSource {
+		if _, err := s.store.GetImageByAssignmentID(ctx, assignmentID); err != nil {
+			return db.ExtractionRun{}, err
+		}
 	}
 
 	run, err := s.store.CreateExtractionRun(ctx, assignmentID, PromptVersion)
@@ -61,7 +101,11 @@ func (s *Service) Start(ctx context.Context, assignmentID string) (db.Extraction
 		return db.ExtractionRun{}, err
 	}
 
-	go s.executeStep(run.ID, 1, "")
+	stepModel, err := resolveFinalModel(options.StepModel)
+	if err != nil {
+		return db.ExtractionRun{}, err
+	}
+	go s.executeStep(run.ID, 1, "", 1, options.UseDefaultSource, stepModel)
 	return run, nil
 }
 
@@ -83,7 +127,15 @@ func (s *Service) Continue(ctx context.Context, runID string, options ContinueOp
 	if err != nil {
 		return db.ExtractionRun{}, err
 	}
-	go s.executeStep(run.ID, nextStep, finalModel)
+	variantCount, err := resolveVariantCount(options.VariantCount)
+	if err != nil {
+		return db.ExtractionRun{}, err
+	}
+	stepModel, err := resolveFinalModel(options.StepModel)
+	if err != nil {
+		return db.ExtractionRun{}, err
+	}
+	go s.executeStep(run.ID, nextStep, finalModel, variantCount, false, stepModel)
 	return run, nil
 }
 
@@ -111,7 +163,7 @@ func (s *Service) Regenerate(ctx context.Context, runID string, step int) (db.Ex
 	if err := s.store.UpdateExtractionStepResults(ctx, runID, "running", "extracting", step, stepResults, parsedContent); err != nil {
 		return db.ExtractionRun{}, err
 	}
-	go s.executeStep(run.ID, step, "")
+	go s.executeStep(run.ID, step, "", 1, false, "")
 	return run, nil
 }
 
@@ -139,11 +191,24 @@ func (s *Service) UpdateStep(ctx context.Context, runID string, step int, conten
 		Content:   content,
 		CreatedAt: time.Now().UTC().Format(time.RFC3339),
 	})
+	if step == generationStep && run.Status == "succeeded" {
+		if score := resultContent(parsePipelineResults(run.StepResults), "self_score"); score != "" {
+			results = append(results, pipelineStepResult{
+				Step:      evaluationStep,
+				Key:       pipelineStepKey(evaluationStep),
+				Title:     pipelineStepTitle(evaluationStep),
+				Content:   score,
+				CreatedAt: time.Now().UTC().Format(time.RFC3339),
+			})
+		}
+	}
 	status := "awaiting_confirmation"
 	assignmentStatus := "processing_waiting"
-	if step == totalPipelineSteps {
+	currentStep := step
+	if step == totalPipelineSteps || (step == generationStep && run.Status == "succeeded") {
 		status = "succeeded"
 		assignmentStatus = "processed"
+		currentStep = totalPipelineSteps
 	}
 	parsedContent, err := json.Marshal(buildPipelineContent(results))
 	if err != nil {
@@ -153,13 +218,32 @@ func (s *Service) UpdateStep(ctx context.Context, runID string, step int, conten
 	if err != nil {
 		return db.ExtractionRun{}, err
 	}
-	if err := s.store.UpdateExtractionStepResults(ctx, runID, status, assignmentStatus, step, stepResults, parsedContent); err != nil {
+	if err := s.store.UpdateExtractionStepResults(ctx, runID, status, assignmentStatus, currentStep, stepResults, parsedContent); err != nil {
 		return db.ExtractionRun{}, err
+	}
+	if step == generationStep {
+		updatedRun, err := s.store.GetExtractionRun(ctx, runID)
+		if err == nil {
+			var parsed pipelineContent
+			if json.Unmarshal(updatedRun.ParsedContent, &parsed) == nil && len(parsed.VariantsHTML) > 0 {
+				parsed.VariantHTML = content
+				parsed.SelectedVariant = 1
+				for index, variant := range parsed.VariantsHTML {
+					if strings.TrimSpace(variant) == strings.TrimSpace(content) {
+						parsed.SelectedVariant = index + 1
+						break
+					}
+				}
+				if patched, marshalErr := json.Marshal(parsed); marshalErr == nil {
+					_ = s.store.UpdateExtractionStepResults(ctx, runID, status, assignmentStatus, currentStep, stepResults, patched)
+				}
+			}
+		}
 	}
 	return s.store.GetExtractionRun(ctx, runID)
 }
 
-func (s *Service) executeStep(runID string, step int, finalModel string) {
+func (s *Service) executeStep(runID string, step int, finalModel string, variantCount int, useDefaultSource bool, stepModel string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
 	defer cancel()
 
@@ -175,7 +259,7 @@ func (s *Service) executeStep(runID string, step int, finalModel string) {
 	}
 
 	results := parsePipelineResults(run.StepResults)
-	resp, result, input, err := s.runStep(ctx, run, step, results, finalModel)
+	resp, result, variants, input, err := s.runStep(ctx, run, step, results, finalModel, variantCount, useDefaultSource, stepModel)
 	if err != nil {
 		provider, model := providerMeta(resp)
 		rawResponse := ""
@@ -196,8 +280,29 @@ func (s *Service) executeStep(runID string, step int, finalModel string) {
 		return
 	}
 
+	var evaluationResult *pipelineStepResult
+	if step == generationStep {
+		resp, result, variants, input, evaluationResult = s.evaluateAndMaybeRetry(ctx, run, results, resp, result, variants, input, finalModel, variantCount, stepModel)
+	}
+
 	results = append(results, result)
 	content := buildPipelineContent(results)
+	if useDefaultSource && step == 1 {
+		content.UsedDefaultHTML = true
+	}
+	if parsedExisting := parsePipelineContent(run.ParsedContent); parsedExisting.UsedDefaultHTML {
+		content.UsedDefaultHTML = true
+	}
+	if step == generationStep && len(variants) > 0 {
+		content.VariantsHTML = variants
+		content.SelectedVariant = 1
+		content.VariantHTML = variants[0]
+	}
+	if evaluationResult != nil {
+		results = append(results, *evaluationResult)
+		content.SelfScore = evaluationResult.Content
+		content.Steps = results
+	}
 	parsedContent, err := json.Marshal(content)
 	if err != nil {
 		s.fail(ctx, runID, resp.Provider, resp.Model, resp.RawResponse, err.Error())
@@ -225,7 +330,7 @@ func (s *Service) executeStep(runID string, step int, finalModel string) {
 
 	status := "awaiting_confirmation"
 	assignmentStatus := "processing_waiting"
-	if step == totalPipelineSteps {
+	if step == totalPipelineSteps || step == generationStep {
 		status = "succeeded"
 		assignmentStatus = "processed"
 	}
@@ -237,7 +342,7 @@ func (s *Service) executeStep(runID string, step int, finalModel string) {
 		Model:            resp.Model,
 		PromptVersion:    PromptVersion,
 		RawResponse:      resp.RawResponse,
-		CurrentStep:      step,
+		CurrentStep:      finishedPipelineStep(step),
 		StepResults:      stepResults,
 		ParsedContent:    parsedContent,
 		Warnings:         json.RawMessage("[]"),
@@ -246,7 +351,7 @@ func (s *Service) executeStep(runID string, step int, finalModel string) {
 	}
 }
 
-func (s *Service) runStep(ctx context.Context, run db.ExtractionRun, step int, results []pipelineStepResult, finalModel string) (*llm.TextGenerationResponse, pipelineStepResult, json.RawMessage, error) {
+func (s *Service) runStep(ctx context.Context, run db.ExtractionRun, step int, results []pipelineStepResult, finalModel string, variantCount int, useDefaultSource bool, stepModel string) (*llm.TextGenerationResponse, pipelineStepResult, []string, json.RawMessage, error) {
 	var (
 		resp *llm.TextGenerationResponse
 		err  error
@@ -261,11 +366,27 @@ func (s *Service) runStep(ctx context.Context, run db.ExtractionRun, step int, r
 
 	switch step {
 	case 1:
+		if useDefaultSource {
+			result := pipelineStepResult{
+				Step:      step,
+				Key:       pipelineStepKey(step),
+				Title:     pipelineStepTitle(step),
+				Content:   defaultSourceHTML(),
+				CreatedAt: time.Now().UTC().Format(time.RFC3339),
+			}
+			input["use_default_source"] = true
+			return &llm.TextGenerationResponse{
+				RawResponse: defaultSourceHTML(),
+				Content:     defaultSourceHTML(),
+				Provider:    "local",
+				Model:       "default-html",
+			}, result, nil, mustJSON(input), nil
+		}
 		image, err := s.store.GetImageByAssignmentID(ctx, run.AssignmentID)
 		if err != nil {
-			return nil, pipelineStepResult{}, mustJSON(input), err
+			return nil, pipelineStepResult{}, nil, mustJSON(input), err
 		}
-		prompt := markdownFromImagePrompt()
+		prompt := htmlFromImagePrompt()
 		input["image_path"] = image.StoredPath
 		input["mime_type"] = image.MimeType
 		input["prompt"] = prompt
@@ -274,52 +395,161 @@ func (s *Service) runStep(ctx context.Context, run db.ExtractionRun, step int, r
 			MimeType:      image.MimeType,
 			Prompt:        prompt,
 			PromptVersion: PromptVersion,
+			Model:         stepModel,
 		})
 	case 2:
-		markdown := resultContent(results, "markdown")
-		if markdown == "" {
-			return nil, pipelineStepResult{}, mustJSON(input), errors.New("step 1 result is missing")
+		sourceHTML := resultContent(results, "source_html")
+		if sourceHTML == "" {
+			return nil, pipelineStepResult{}, nil, mustJSON(input), errors.New("step 1 result is missing")
 		}
-		prompt := parametersPrompt(markdown)
-		input["prompt"] = prompt
-		resp, err = s.provider.GenerateAssignmentText(ctx, llm.GenerateAssignmentTextRequest{
-			Prompt:        prompt,
-			PromptVersion: PromptVersion,
-		})
+		sections, splitErr := extractTaskSections(sourceHTML)
+		if splitErr != nil {
+			return nil, pipelineStepResult{}, nil, mustJSON(input), splitErr
+		}
+		tasks := make([]taskParameters, 0, len(sections))
+		rawOutputs := make([]map[string]any, 0, len(sections))
+		for _, section := range sections {
+			prompt := parametersPrompt(section.HTML)
+			taskResp, taskErr := s.provider.GenerateAssignmentText(ctx, llm.GenerateAssignmentTextRequest{
+				Prompt:        prompt,
+				PromptVersion: PromptVersion,
+				Model:         stepModel,
+			})
+			if taskErr != nil {
+				return taskResp, pipelineStepResult{}, nil, mustJSON(input), taskErr
+			}
+			params := parseTaskParameters(normalizeLLMText(taskResp.Content))
+			params.TaskNumber = section.Number
+			params.Heading = section.Heading
+			tasks = append(tasks, params)
+			rawOutputs = append(rawOutputs, map[string]any{
+				"task_number": section.Number,
+				"heading":     section.Heading,
+				"content":     normalizeLLMText(taskResp.Content),
+				"provider":    taskResp.Provider,
+				"model":       taskResp.Model,
+			})
+			resp = taskResp
+		}
+		serialized := string(mustIndentJSON(parameterBundle{Tasks: tasks}))
+		input["task_count"] = len(sections)
+		input["tasks"] = sections
+		result := pipelineStepResult{
+			Step:      step,
+			Key:       pipelineStepKey(step),
+			Title:     pipelineStepTitle(step),
+			Content:   serialized,
+			CreatedAt: time.Now().UTC().Format(time.RFC3339),
+		}
+		return &llm.TextGenerationResponse{
+			RawResponse: string(mustIndentJSON(rawOutputs)),
+			Content:     serialized,
+			Provider:    providerValue(resp),
+			Model:       modelValue(resp, stepModel),
+		}, result, nil, mustJSON(input), nil
 	case 3:
-		markdown := resultContent(results, "markdown")
+		sourceHTML := resultContent(results, "source_html")
 		parameters := resultContent(results, "parameters")
-		if markdown == "" || parameters == "" {
-			return nil, pipelineStepResult{}, mustJSON(input), errors.New("previous pipeline results are missing")
+		if sourceHTML == "" || parameters == "" {
+			return nil, pipelineStepResult{}, nil, mustJSON(input), errors.New("previous pipeline results are missing")
 		}
-		prompt := variationRulesPrompt(markdown, parameters)
-		input["prompt"] = prompt
-		resp, err = s.provider.GenerateAssignmentText(ctx, llm.GenerateAssignmentTextRequest{
-			Prompt:        prompt,
-			PromptVersion: PromptVersion,
-		})
+		sections, splitErr := extractTaskSections(sourceHTML)
+		if splitErr != nil {
+			return nil, pipelineStepResult{}, nil, mustJSON(input), splitErr
+		}
+		bundle, parseErr := parseParameterBundle(parameters)
+		if parseErr != nil {
+			return nil, pipelineStepResult{}, nil, mustJSON(input), parseErr
+		}
+		if len(bundle.Tasks) != len(sections) {
+			return nil, pipelineStepResult{}, nil, mustJSON(input), fmt.Errorf("expected %d task parameter sets, got %d", len(sections), len(bundle.Tasks))
+		}
+		model := finalModel
+		if model == "" {
+			model = stepModel
+		}
+		input["variant_count"] = variantCount
+		input["task_count"] = len(sections)
+		input["tasks"] = bundle.Tasks
+		input["user_comment"] = bundle.UserComment
+		fullVariants := make([]string, 0, variantCount)
+		rawOutputs := make([]map[string]any, 0, variantCount)
+		for variantIndex := 0; variantIndex < variantCount; variantIndex++ {
+			generatedTasks := make([]string, 0, len(sections))
+			taskOutputs := make([]map[string]any, 0, len(sections))
+			for sectionIndex, section := range sections {
+				params := bundle.Tasks[sectionIndex]
+				prompt := generationPrompt(section.HTML, params, bundle.UserComment)
+				taskResp, taskErr := s.provider.GenerateAssignmentText(ctx, llm.GenerateAssignmentTextRequest{
+					Prompt:        prompt,
+					PromptVersion: PromptVersion,
+					Model:         model,
+				})
+				if taskErr != nil {
+					return taskResp, pipelineStepResult{}, nil, mustJSON(input), taskErr
+				}
+				taskHTML := normalizeLLMText(taskResp.Content)
+				if !containsTag(taskHTML, "h2") {
+					taskHTML = ensureSectionHeading(section.HTML, taskHTML)
+				}
+				generatedTasks = append(generatedTasks, taskHTML)
+				taskOutputs = append(taskOutputs, map[string]any{
+					"task_number": params.TaskNumber,
+					"heading":     params.Heading,
+					"content":     taskHTML,
+					"provider":    taskResp.Provider,
+					"model":       taskResp.Model,
+				})
+				resp = taskResp
+			}
+			fullVariant, mergeErr := mergeTaskSections(sourceHTML, sections, generatedTasks)
+			if mergeErr != nil {
+				return resp, pipelineStepResult{}, nil, mustJSON(input), mergeErr
+			}
+			fullVariants = append(fullVariants, fullVariant)
+			rawOutputs = append(rawOutputs, map[string]any{
+				"variant_index": variantIndex + 1,
+				"tasks":         taskOutputs,
+			})
+		}
+		result := pipelineStepResult{
+			Step:      step,
+			Key:       pipelineStepKey(step),
+			Title:     pipelineStepTitle(step),
+			Content:   fullVariants[0],
+			CreatedAt: time.Now().UTC().Format(time.RFC3339),
+		}
+		return &llm.TextGenerationResponse{
+			RawResponse: string(mustIndentJSON(rawOutputs)),
+			Content:     fullVariants[0],
+			Provider:    providerValue(resp),
+			Model:       modelValue(resp, model),
+		}, result, fullVariants, mustJSON(input), nil
 	case 4:
-		markdown := resultContent(results, "markdown")
-		parameters := resultContent(results, "parameters")
-		variationRules := resultContent(results, "variation_rules")
-		if markdown == "" || parameters == "" || variationRules == "" {
-			return nil, pipelineStepResult{}, mustJSON(input), errors.New("previous pipeline results are missing")
+		sourceHTML := resultContent(results, "source_html")
+		variantHTML := resultContent(results, "variant_html")
+		if sourceHTML == "" || variantHTML == "" {
+			return nil, pipelineStepResult{}, nil, mustJSON(input), errors.New("previous pipeline results are missing")
 		}
-		prompt := variantPrompt(markdown, parameters, variationRules)
+		prompt := selfEvaluationPrompt(sourceHTML, variantHTML)
 		input["prompt"] = prompt
 		resp, err = s.provider.GenerateAssignmentText(ctx, llm.GenerateAssignmentTextRequest{
 			Prompt:        prompt,
 			PromptVersion: PromptVersion,
-			Model:         finalModel,
+			Model:         stepModel,
 		})
 	default:
-		return nil, pipelineStepResult{}, mustJSON(input), fmt.Errorf("unsupported pipeline step %d", step)
+		return nil, pipelineStepResult{}, nil, mustJSON(input), fmt.Errorf("unsupported pipeline step %d", step)
 	}
 	if err != nil {
-		return resp, pipelineStepResult{}, mustJSON(input), err
+		return resp, pipelineStepResult{}, nil, mustJSON(input), err
 	}
 
 	content := normalizeLLMText(resp.Content)
+	variants := []string(nil)
+	if step == 4 {
+		content = strconv.Itoa(extractScore(content))
+	}
 	result := pipelineStepResult{
 		Step:      step,
 		Key:       pipelineStepKey(step),
@@ -327,7 +557,99 @@ func (s *Service) runStep(ctx context.Context, run db.ExtractionRun, step int, r
 		Content:   content,
 		CreatedAt: time.Now().UTC().Format(time.RFC3339),
 	}
-	return resp, result, mustJSON(input), nil
+	return resp, result, variants, mustJSON(input), nil
+}
+
+func (s *Service) evaluateAndMaybeRetry(
+	ctx context.Context,
+	run db.ExtractionRun,
+	previousResults []pipelineStepResult,
+	resp *llm.TextGenerationResponse,
+	result pipelineStepResult,
+	variants []string,
+	input json.RawMessage,
+	finalModel string,
+	variantCount int,
+	stepModel string,
+) (*llm.TextGenerationResponse, pipelineStepResult, []string, json.RawMessage, *pipelineStepResult) {
+	sourceHTML := resultContent(previousResults, "source_html")
+	evaluationModel := finalModel
+	if evaluationModel == "" {
+		evaluationModel = stepModel
+	}
+
+	evalResp, evalResult, score, evalInput, err := s.evaluateVariant(ctx, run, sourceHTML, result.Content, evaluationModel)
+	if err != nil {
+		s.logger.Warn("failed to evaluate generated variant", "run_id", run.ID, "error", err)
+		return resp, result, variants, input, nil
+	}
+	s.insertEvaluationRun(ctx, run.ID, evalResp, evalResult, evalInput)
+
+	if score > 6 {
+		return resp, result, variants, input, &evalResult
+	}
+
+	retryResp, retryResult, retryVariants, retryInput, retryErr := s.runStep(ctx, run, generationStep, previousResults, finalModel, variantCount, false, stepModel)
+	if retryErr != nil {
+		s.logger.Warn("failed to regenerate low-scored variant", "run_id", run.ID, "score", score, "error", retryErr)
+		return resp, result, variants, input, &evalResult
+	}
+
+	retryEvalResp, retryEvalResult, _, retryEvalInput, retryEvalErr := s.evaluateVariant(ctx, run, sourceHTML, retryResult.Content, evaluationModel)
+	if retryEvalErr != nil {
+		s.logger.Warn("failed to evaluate regenerated variant", "run_id", run.ID, "error", retryEvalErr)
+		return retryResp, retryResult, retryVariants, retryInput, nil
+	}
+	s.insertEvaluationRun(ctx, run.ID, retryEvalResp, retryEvalResult, retryEvalInput)
+	return retryResp, retryResult, retryVariants, retryInput, &retryEvalResult
+}
+
+func (s *Service) evaluateVariant(ctx context.Context, run db.ExtractionRun, sourceHTML, variantHTML, model string) (*llm.TextGenerationResponse, pipelineStepResult, int, json.RawMessage, error) {
+	prompt := selfEvaluationPrompt(sourceHTML, variantHTML)
+	input := map[string]any{
+		"assignment_id":  run.AssignmentID,
+		"run_id":         run.ID,
+		"step":           evaluationStep,
+		"prompt_version": PromptVersion,
+		"prompt":         prompt,
+	}
+	resp, err := s.provider.GenerateAssignmentText(ctx, llm.GenerateAssignmentTextRequest{
+		Prompt:        prompt,
+		PromptVersion: PromptVersion,
+		Model:         model,
+	})
+	if err != nil {
+		return resp, pipelineStepResult{}, 0, mustJSON(input), err
+	}
+
+	score := extractScore(resp.Content)
+	result := pipelineStepResult{
+		Step:      evaluationStep,
+		Key:       pipelineStepKey(evaluationStep),
+		Title:     pipelineStepTitle(evaluationStep),
+		Content:   strconv.Itoa(score),
+		CreatedAt: time.Now().UTC().Format(time.RFC3339),
+	}
+	return resp, result, score, mustJSON(input), nil
+}
+
+func (s *Service) insertEvaluationRun(ctx context.Context, runID string, resp *llm.TextGenerationResponse, result pipelineStepResult, input json.RawMessage) {
+	if resp == nil {
+		return
+	}
+	resultJSON, _ := json.Marshal(result)
+	if err := s.store.InsertLLMRun(ctx, db.LLMRunInput{
+		TaskType:      pipelineTaskType(evaluationStep),
+		Provider:      resp.Provider,
+		Model:         resp.Model,
+		PromptVersion: PromptVersion,
+		Input:         input,
+		RawOutput:     resp.RawResponse,
+		ParsedOutput:  resultJSON,
+		Status:        "succeeded",
+	}); err != nil {
+		s.logger.Error("failed to insert evaluation llm run", "run_id", runID, "error", err)
+	}
 }
 
 func (s *Service) fail(ctx context.Context, runID, provider, model, rawResponse, message string) {
@@ -347,13 +669,24 @@ func parsePipelineResults(raw json.RawMessage) []pipelineStepResult {
 	return results
 }
 
+func parsePipelineContent(raw json.RawMessage) pipelineContent {
+	if len(raw) == 0 || string(raw) == "null" {
+		return pipelineContent{}
+	}
+	var content pipelineContent
+	if err := json.Unmarshal(raw, &content); err != nil {
+		return pipelineContent{}
+	}
+	return content
+}
+
 func buildPipelineContent(results []pipelineStepResult) pipelineContent {
 	return pipelineContent{
-		Markdown:        resultContent(results, "markdown"),
-		Parameters:      resultContent(results, "parameters"),
-		VariationRules:  resultContent(results, "variation_rules"),
-		VariantMarkdown: resultContent(results, "variant_markdown"),
-		Steps:           results,
+		SourceHTML:  resultContent(results, "source_html"),
+		Parameters:  resultContent(results, "parameters"),
+		VariantHTML: resultContent(results, "variant_html"),
+		SelfScore:   resultContent(results, "self_score"),
+		Steps:       results,
 	}
 }
 
@@ -390,16 +723,224 @@ func resolveFinalModel(option string) (string, error) {
 	}
 }
 
+func resolveVariantCount(count int) (int, error) {
+	if count == 0 {
+		return 1, nil
+	}
+	if count < 1 || count > 10 {
+		return 0, ErrInvalidVariantCount
+	}
+	return count, nil
+}
+
+func parseTaskParameters(content string) taskParameters {
+	return taskParameters{
+		TaskType:    extractLabeledValue(content, "Тип задания"),
+		SchoolClass: extractLabeledValue(content, "Предполагаемый класс"),
+		Difficulty:  extractLabeledValue(content, "Уровень сложности задания"),
+	}
+}
+
+func parseParameterBundle(content string) (parameterBundle, error) {
+	content = normalizeLLMText(content)
+	var bundle parameterBundle
+	if err := json.Unmarshal([]byte(content), &bundle); err != nil {
+		return parameterBundle{}, fmt.Errorf("failed to parse step 2 parameters: %w", err)
+	}
+	if len(bundle.Tasks) == 0 {
+		return parameterBundle{}, errors.New("step 2 parameters contain no tasks")
+	}
+	return bundle, nil
+}
+
+func formatTaskParameters(params taskParameters) string {
+	return strings.Join([]string{
+		"Тип задания: " + valueOrStar(params.TaskType),
+		"Предполагаемый класс: " + valueOrStar(params.SchoolClass),
+		"Уровень сложности задания: " + valueOrStar(params.Difficulty),
+	}, "\n")
+}
+
+func extractLabeledValue(content, label string) string {
+	for _, line := range strings.Split(content, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(strings.ToLower(line), strings.ToLower(label)) {
+			parts := strings.SplitN(line, ":", 2)
+			if len(parts) == 2 {
+				return strings.TrimSpace(parts[1])
+			}
+		}
+	}
+	return "*"
+}
+
+func valueOrStar(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "*"
+	}
+	return value
+}
+
+func extractTaskSections(sourceHTML string) ([]taskSection, error) {
+	lower := strings.ToLower(sourceHTML)
+	trailingStart := len(sourceHTML)
+	if bodyClose := strings.LastIndex(lower, "</body>"); bodyClose >= 0 {
+		trailingStart = bodyClose
+	} else if htmlClose := strings.LastIndex(lower, "</html>"); htmlClose >= 0 {
+		trailingStart = htmlClose
+	}
+	var starts []int
+	searchFrom := 0
+	for {
+		index := strings.Index(lower[searchFrom:], "<h2")
+		if index < 0 {
+			break
+		}
+		starts = append(starts, searchFrom+index)
+		searchFrom += index + 3
+	}
+	if len(starts) == 0 {
+		return nil, errors.New("no task sections with <h2> were found in source html")
+	}
+	sections := make([]taskSection, 0, len(starts))
+	for i, start := range starts {
+		end := trailingStart
+		if i+1 < len(starts) {
+			end = starts[i+1]
+		}
+		sectionHTML := strings.TrimSpace(sourceHTML[start:end])
+		sections = append(sections, taskSection{
+			Number:  i + 1,
+			Heading: extractTaskHeading(sectionHTML),
+			HTML:    sectionHTML,
+			Start:   start,
+			End:     end,
+		})
+	}
+	return sections, nil
+}
+
+func extractTaskHeading(sectionHTML string) string {
+	lower := strings.ToLower(sectionHTML)
+	start := strings.Index(lower, "<h2")
+	if start < 0 {
+		return ""
+	}
+	openEnd := strings.Index(lower[start:], ">")
+	if openEnd < 0 {
+		return ""
+	}
+	contentStart := start + openEnd + 1
+	closeIndex := strings.Index(lower[contentStart:], "</h2>")
+	if closeIndex < 0 {
+		return ""
+	}
+	return strings.TrimSpace(stripTags(sectionHTML[contentStart : contentStart+closeIndex]))
+}
+
+func stripTags(value string) string {
+	replacer := regexp.MustCompile(`(?is)<[^>]+>`)
+	return strings.TrimSpace(replacer.ReplaceAllString(value, " "))
+}
+
+func mergeTaskSections(sourceHTML string, sections []taskSection, replacements []string) (string, error) {
+	if len(sections) != len(replacements) {
+		return "", errors.New("task replacement count does not match source task count")
+	}
+	var builder strings.Builder
+	builder.WriteString(sourceHTML[:sections[0].Start])
+	for index, section := range sections {
+		builder.WriteString(strings.TrimSpace(replacements[index]))
+		if index+1 < len(sections) {
+			builder.WriteString(sourceHTML[section.End:sections[index+1].Start])
+			continue
+		}
+		builder.WriteString(sourceHTML[section.End:])
+	}
+	return builder.String(), nil
+}
+
+func containsTag(content, tag string) bool {
+	return strings.Contains(strings.ToLower(content), "<"+strings.ToLower(tag))
+}
+
+func ensureSectionHeading(originalSection, generated string) string {
+	lower := strings.ToLower(originalSection)
+	start := strings.Index(lower, "<h2")
+	if start < 0 {
+		return generated
+	}
+	openEnd := strings.Index(lower[start:], ">")
+	if openEnd < 0 {
+		return generated
+	}
+	closeIndex := strings.Index(lower[start+openEnd+1:], "</h2>")
+	if closeIndex < 0 {
+		return generated
+	}
+	headingHTML := originalSection[start : start+openEnd+1+closeIndex+5]
+	return headingHTML + "\n" + strings.TrimSpace(generated)
+}
+
+func mustIndentJSON(value any) []byte {
+	data, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return []byte("{}")
+	}
+	return data
+}
+
+func providerValue(resp *llm.TextGenerationResponse) string {
+	if resp == nil || resp.Provider == "" {
+		return "unknown"
+	}
+	return resp.Provider
+}
+
+func modelValue(resp *llm.TextGenerationResponse, fallback string) string {
+	if resp != nil && resp.Model != "" {
+		return resp.Model
+	}
+	return fallback
+}
+
+func extractScore(content string) int {
+	content = normalizeLLMText(content)
+	var parsed struct {
+		Score int `json:"score"`
+	}
+	if err := json.Unmarshal([]byte(content), &parsed); err == nil && parsed.Score >= 1 && parsed.Score <= 10 {
+		return parsed.Score
+	}
+	match := scorePattern.FindString(content)
+	if match == "" {
+		return 1
+	}
+	score, err := strconv.Atoi(match)
+	if err != nil || score < 1 || score > 10 {
+		return 1
+	}
+	return score
+}
+
+func finishedPipelineStep(step int) int {
+	if step == generationStep {
+		return evaluationStep
+	}
+	return step
+}
+
 func pipelineStepKey(step int) string {
 	switch step {
 	case 1:
-		return "markdown"
+		return "source_html"
 	case 2:
 		return "parameters"
 	case 3:
-		return "variation_rules"
+		return "variant_html"
 	case 4:
-		return "variant_markdown"
+		return "self_score"
 	default:
 		return "unknown"
 	}
@@ -408,13 +949,13 @@ func pipelineStepKey(step int) string {
 func pipelineStepTitle(step int) string {
 	switch step {
 	case 1:
-		return "Markdown исходного задания"
+		return "HTML исходного задания"
 	case 2:
 		return "Параметры задания"
 	case 3:
-		return "Допустимые изменения"
+		return "Новый вариант задания (HTML)"
 	case 4:
-		return "Новый вариант задания"
+		return "Самооценка результата"
 	default:
 		return "Шаг пайплайна"
 	}
@@ -454,76 +995,189 @@ func normalizeLLMText(content string) string {
 	return content
 }
 
-func markdownFromImagePrompt() string {
-	return `Я отправляю тебе школьное задание. Преобразуй его в markdown.
+func htmlFromImagePrompt() string {
+	return `Я отправляю тебе файл с вариантом школьной проверочной работы по английскому языку. Распознай текст и преобразуй его в корректный HTML-документ.
 
-В качестве ответа пришли только содержимое md файла без дополнительного текста и без твоих комментариев.
-Решать и изменять задание не нужно.
-Оформи ответ в виде блока кода с использованием triple backticks в начале и в конце, чтобы было проще скопировать эти данные.`
+Требования:
+1. Сначала полностью распознай текст из изображения или PDF, затем преобразуй его в HTML.
+2. В ответе пришли только содержимое HTML-файла без пояснений и комментариев.
+3. Не решай задания и не изменяй их формулировки.
+4. Сохраняй исходную структуру, порядок, нумерацию и текст полностью, ничего не удаляй и не переводи на другие языки
+5. Сгенерируй полноценный HTML-документ по правилам HTML5:
+   - обязательно добавь <!DOCTYPE html>;
+   - используй теги <html>, <head> и <body>;
+   - в <head> добавь <meta charset="UTF-8">;
+   - добавь осмысленный <title>.
+6. Каждое самостоятельное задание помещай под отдельный заголовок второго уровня (<h2>).
+7. Не разделяй одно задание на несколько заголовков:
+   - текст и вопросы/подзадания к нему являются одним заданием;
+   - диалог и задания к нему являются одним заданием;
+   - таблица, текст, варианты ответов и связанные с ними вопросы являются одним заданием.
+8. Если вся работа состоит только из одного текста с несколькими вопросами или подзаданиями, оформи всё под одним заголовком <h2>.
+9. Вопросы внутри одного задания не оформляй как отдельные задания и не создавай для них отдельные <h2>.
+10. Используй семантически подходящие HTML-теги:
+   - <p> для абзацев;
+   - <ol>, <ul>, <li> для списков;
+   - <table>, <tr>, <td> для таблиц;
+   - <strong>, <em> при необходимости.
+11. Старайся сохранять визуальную структуру оригинала: переносы строк, списки, подпункты, варианты ответов и таблицы.
+12. Ответ оформи только в виде одного блока кода с triple backticks в начале и в конце.`
 }
 
-func parametersPrompt(markdown string) string {
-	return `Я отправляю тебе задание в виде markdown файла. По данным из файла определи параметры, которые я опишу ниже. Выбери один вариант из списка возможных значений, если они указаны. Если значение параметра определить не удалось, используй "*".
+func parametersPrompt(taskHTML string) string {
+	return `Я отправляю тебе задание из школьной проверочной по английскому языку в виде html заголовка второго уровня. По данным из файла определи параметры, которые я опишу ниже. Выбери один вариант из списка возможных значений (если они указаны), если значение параметра определить не удалось используй "*". 
 
 Параметры
-Предметная область: Русский язык | Математика | Обществознание | Информатика и ИКТ | География | Биология | Физика | Химия | История | Литература | Иностранные языки
 
-Тип задания: Множественный выбор (Multiple choice) | Альтернативный выбор (True/False) | Перекрестный выбор (Matching) | Упорядочение (Rearrangement) | Заполнение пропусков (Completion) | Вставка слова в нужной форме / Трансформация (Transformation) | Ответ на вопрос (Answering questions) | Перевод (Translation) | Диалог / Интервью (Dialogue / Interview) | Обсуждение (Discussion) | Написание письма / эссе (Letter / Essay writing) | Имитация / Кроссворд / языковые игры (Crossword / Language games)
+Тип задания: Множественный выбор (Multiple choicef) | Альтернативный выбор (True/False) | Перекрестный выбор (Matching) | Упорядочение (Rearrangement) | Заполнение пропусков (Completion) | Вставка слова в нужной форме / Трансформация (Transformation) | Ответ на вопрос (Answering questions) | Перевод (Translation) | Диалог / Интервью (Dialogue / Interview) | Обсуждение (Discussion) | Написание письма / эссе (Letter / Essay writing)
 
 Предполагаемый класс: 1-11
 
 Уровень сложности задания: 1-10
 
-В ответе перечисли только эти параметры и их значения. Писать свои комментарии и дополнительный текст не нужно.
+в ответе перечисли только эти параметры и их значения. Писать свои комментарии и дополнительный текст не нужно. Пример вывода:
 
-Пример вывода:
-Предметная область: Иностранные языки
 Тип задания: Перекрестный выбор (Matching)
 Предполагаемый класс: 10
 Уровень сложности задания: 7
 
-<результат step1>
-` + markdown + `
-</результат step1>`
+<task_html>
+` + taskHTML + `
+</task_html>`
 }
 
-func variationRulesPrompt(markdown, parameters string) string {
-	return `Я отправляю тебе задание в виде markdown файла. Необходимо на его основе создать ещё один новый вариант такого же задания за счет допустимых изменений. Было определено, что это задание имеет следующие параметры:
+func generationPrompt(taskHTML string, params taskParameters, userComment string) string {
+	prompt := `Я отправляю тебе задание в виде HTML под заголовком второго уровня. Необходимо на его основе создать ещё один новый вариант такого же задания.
 
-<результат step2>
-` + parameters + `
-</результат step2>
+Было определено, что это задание имеет следующие параметры:
 
-Допустимый характер вариации (можно выбрать несколько): замена числовых данных (диапазон, тип чисел — целые, десятичные, дроби), изменение порядка перечисления (список условий, объектов, действий), синонимическая замена неключевых формулировок, замена контекста (ситуации, примеры) при сохранении логики, изменение имён, названий, единиц измерения (без изменения сложности), перестановка шагов в многошаговой инструкции.
+<params>
+` + formatTaskParameters(params) + `
+</params>
 
-В качестве ответа пришли только список допустимых вариаций изменений этого задания без дополнительного текста и без твоих комментариев.
-
-Пример ответа:
-замена числовых данных (диапазон, тип чисел — целые, десятичные, дроби), перестановка шагов в многошаговой инструкции
-
-<результат step1>
-` + markdown + `
-</результат step1>`
-}
-
-func variantPrompt(markdown, parameters, variationRules string) string {
-	return `Я отправляю тебе задание в виде markdown файла. Необходимо на его основе создать ещё один новый вариант такого же задания. Было определено, что это задание имеет следующие параметры:
-
-<результат step2>
-` + parameters + `
-</результат step2>
-
-Определи части задания, которые можно изменять, а какие нельзя, например формулировка задания, нумерация, индексы букв и пр., чтобы избежать нарушения логики.
-
-Также определено, что нельзя менять следующий текст (если тут стоит "-", то изменения допустимы на твое усмотрение):
+Перед генерацией нового варианта:
+1. Определи, какие части задания можно изменять, а какие нельзя, чтобы не нарушить структуру и логику задания.
+2. Не изменяй:
+   - тип задания;
+   - структуру задания;
+   - способ оформления;
+   - количество элементов, если это важно для логики;
+   - индексы букв, цифр и обозначений, если их изменение может нарушить соответствия.
+3. Следующий текст запрещено изменять (если указан "-", изменения допустимы на твоё усмотрение):
 -
 
-Допустимые изменения в задании для создания нового варианта:
-` + variationRules + `
+Допустимые изменения для создания нового варианта:
+- замена контекста и ситуации при сохранении логики;
+- изменение имён, названий, мест, предметов;
+- изменение порядка элементов;
+- синонимическая замена неключевых формулировок;
+- замена текста, вопросов и вариантов ответов на новые аналогичного уровня сложности;
+- изменение деталей без изменения типа навыка и сложности задания.
 
-В качестве ответа пришли только содержимое md файла нового варианта без дополнительного текста и без твоих комментариев. Решать задания не нужно. Оформи ответ в виде блока кода с использованием triple backticks в начале и в конце, чтобы было проще скопировать эти данные.
+ВАЖНО:
+1. Если в оригинале инструкция к заданию написана на русском языке — сохрани инструкцию на русском языке.
+2. Всё содержимое самого задания по английскому языку должно быть только на английском языке:
+   - тексты;
+   - диалоги;
+   - вопросы;
+   - варианты ответов;
+   - слова и фразы для сопоставления.
+3. Не переводи английское содержимое задания на русский язык.
+4. Новый вариант должен быть полностью новым по содержанию, но аналогичным по структуре, формату и уровню сложности.
+5. Не добавляй ответы, пояснения или решения.`
 
-<результат step1>
-` + markdown + `
-</результат step1>`
+	if strings.TrimSpace(userComment) != "" {
+		prompt += `
+
+Дополнительный комментарий пользователя:
+` + strings.TrimSpace(userComment)
+	}
+
+	prompt += `
+
+В качестве ответа пришли только содержимое нового варианта  в html-формате под заголовком второго уровня без дополнительного текста и комментариев.
+
+<task_html>
+` + taskHTML + `
+</task_html>`
+	return prompt
+}
+
+func selfEvaluationPrompt(sourceHTML, variantHTML string) string {
+	return `Я прикрепил два файла. Первый файл - эталонный учебный вариант. Второй файл - сгенерированный новый вариант.
+
+Проверь, насколько второй вариант соответствует первому по структуре, уровню сложности, типам заданий, объему, формулировкам и учебной логике.
+
+Оцени по шкале от 1 до 10:
+1. Что сохранено хорошо.
+2. Где есть отличия или ошибки.
+3. Можно ли использовать второй вариант для ученика.
+4. Что нужно исправить, чтобы он стал ближе к эталону.
+
+Не требуй полного совпадения чисел и условий, если смысл, сложность и формат заданий сохранены. В ответе укажи итоговую оценку 1-10. Больше ничего не пиши. Пример ответа:
+4
+
+Верни только одно число от 1 до 10.
+
+<эталонный_вариант>
+` + sourceHTML + `
+</эталонный_вариант>
+
+<сгенерированный_вариант>
+` + variantHTML + `
+</сгенерированный_вариант>`
+}
+
+func defaultSourceHTML() string {
+	return `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Тема 10 № 39</title>
+</head>
+<body>
+<h1>Тема 10 № 39</h1>
+<h2>Задание 1</h2>
+<p>Установите соответствие между заголовками 1-8 и текстами A-G. Запишите свои ответы в таблицу. Используйте каждую цифру только один раз. В задании один лишний заголовок.</p>
+<ol>
+  <li>Places to stay in.</li>
+  <li>Arts and culture.</li>
+  <li>New country image.</li>
+  <li>Going out.</li>
+  <li>Different landscapes.</li>
+  <li>Transport system.</li>
+  <li>National languages.</li>
+  <li>Eating out.</li>
+</ol>
+<p>A. Belgium has always had a lot more than the faceless administrative buildings that you can see in the outskirts of its capital, Brussels. A number of beautiful historic cities and Brussels itself offer impressive architecture, lively nightlife, first-rate restaurants and numerous other attractions for out visitors. Today, the old-fashioned idea of 'boring Belgium' has been well and truly forgotten, as more and more people discover its very individual charms for themselves.</p>
+<p>B. Nature in Belgium is varied. The rivers and hills of the Ardennes in the southeast contrast sharply with the rolling plains which make up much of the northern and western countryside. The most notable features are the great forest near the frontier with Germany and Luxembourg and the wide, sandy beaches of the northern coast.</p>
+<p>C. It is easy both to enter and to travel around pocket-sized Belgium which is divided into the Dutch-speaking north and the French-speaking south. Officially the Belgians speak French and German, Dutch is spoken slightly more widely than French, and German is spoken the least. The Belgians, living in the north, will often prefer to answer visitors in English rather than French, even if the visitor's French is good.</p>
+<p>D. Belgium has a wide range of hotels from 5-star luxury to small family pensions and inns. In some regions of the country, farm holidays are available. There visitors can (for a small cost) participate in the daily work of the farm. There are plenty of opportunities to rent furnished villas, flats, rooms, or bungalows for a holiday period. These holiday houses and flats are comfortable and well-equipped.</p>
+<p>E. The Belgian style of cooking is similar to French, based on meat and seafood. Each region in Belgium has its own special dish. Butter, cream, beer and wine are generally used in cooking. The Belgians are keen on their food, and the country is very well supplied with excellent restaurants to suit all budgets. The perfect evening out here involves a delicious meal, and the restaurants and cafes are busy at all times of the week.</p>
+<p>F. As well as being one of the best cities in the world for eating out (both for its high quality and range), Brussels has a very active and varied nightlife. It has 10 theatres which produce plays in both Dutch and French. There are also dozens of cinemas, numerous discos and many other night-time cafes in Brussels. Elsewhere, the nightlife choices depend on the size of the town, but there is no shortage of fun to be had in any of the major cities.</p>
+<p>G. There is a good system of underground trains, trams and buses in all the major towns and cities. In addition, Belgium's waterways offer a pleasant way to enjoy the country. Visitors can take a one-hour cruise around the canals of Bruges (sometimes described as the Venice of the North) or an extended cruise along the rivers and canals linking the major cities of Belgium and the Netherlands.</p>
+<table>
+  <tr>
+    <th>Текст</th>
+    <th>A</th>
+    <th>B</th>
+    <th>C</th>
+    <th>D</th>
+    <th>E</th>
+    <th>F</th>
+    <th>G</th>
+  </tr>
+  <tr>
+    <td>Заголовок</td>
+    <td></td>
+    <td></td>
+    <td></td>
+    <td></td>
+    <td></td>
+    <td></td>
+    <td></td>
+  </tr>
+</table>
+</body>
+</html>`
 }

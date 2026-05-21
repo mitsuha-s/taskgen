@@ -146,16 +146,20 @@ func (p *GigaChatProvider) AnalyzeAssignmentImage(ctx context.Context, req Analy
 }
 
 func (p *GigaChatProvider) ConvertAssignmentImageToMarkdown(ctx context.Context, req ConvertAssignmentImageToMarkdownRequest) (*TextGenerationResponse, error) {
+	model := strings.TrimSpace(req.Model)
+	if model == "" {
+		model = p.visionModel
+	}
 	if strings.TrimSpace(p.authKey) == "" {
 		return &TextGenerationResponse{
 			Provider: "gigachat",
-			Model:    p.visionModel,
+			Model:    model,
 		}, ErrProviderNotConfigured
 	}
 	if req.MimeType == "image/webp" {
 		return &TextGenerationResponse{
 			Provider: "gigachat",
-			Model:    p.visionModel,
+			Model:    model,
 		}, errors.New("GigaChat image upload supports jpeg/png/tiff/bmp; webp is not supported")
 	}
 
@@ -163,7 +167,7 @@ func (p *GigaChatProvider) ConvertAssignmentImageToMarkdown(ctx context.Context,
 	if err != nil {
 		return &TextGenerationResponse{
 			Provider: "gigachat",
-			Model:    p.visionModel,
+			Model:    model,
 		}, err
 	}
 
@@ -172,11 +176,11 @@ func (p *GigaChatProvider) ConvertAssignmentImageToMarkdown(ctx context.Context,
 		return &TextGenerationResponse{
 			RawResponse: uploadRaw,
 			Provider:    "gigachat",
-			Model:       p.visionModel,
+			Model:       model,
 		}, err
 	}
 
-	raw, content, err := p.chatText(ctx, token, p.visionModel, []map[string]any{
+	raw, content, err := p.chatText(ctx, token, model, []map[string]any{
 		{
 			"role":    "system",
 			"content": "You convert school assignment images into faithful markdown. Return only the requested content.",
@@ -191,7 +195,7 @@ func (p *GigaChatProvider) ConvertAssignmentImageToMarkdown(ctx context.Context,
 		return &TextGenerationResponse{
 			RawResponse: raw,
 			Provider:    "gigachat",
-			Model:       p.visionModel,
+			Model:       model,
 		}, err
 	}
 
@@ -199,7 +203,7 @@ func (p *GigaChatProvider) ConvertAssignmentImageToMarkdown(ctx context.Context,
 		RawResponse: raw,
 		Content:     content,
 		Provider:    "gigachat",
-		Model:       p.visionModel,
+		Model:       model,
 	}, nil
 }
 
