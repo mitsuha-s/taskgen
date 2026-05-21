@@ -1,10 +1,10 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { AlertCircle, ArrowRight, CheckCircle2, Download, FileText, Loader2, Plus, RotateCcw, Save, Trash2 } from 'lucide-react';
+import { AlertCircle, ArrowRight, CheckCircle2, Download, FileText, Loader2, RotateCcw, Save } from 'lucide-react';
 import { useRef, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { api, PipelineStepResult, userMessage } from '../lib/api';
 
-const totalSteps = 5;
+const totalSteps = 4;
 
 export default function ReviewPage() {
   const { id } = useParams<{ id: string }>();
@@ -16,7 +16,6 @@ export default function ReviewPage() {
     1: 'pro',
     2: 'pro',
     3: 'pro',
-    4: 'pro',
   });
   const [variantCount, setVariantCount] = useState(3);
 
@@ -140,7 +139,7 @@ export default function ReviewPage() {
                   const nextStep = step + 1;
                   await continueRun.mutateAsync({
                     step_model: stepModels[nextStep] ?? 'pro',
-                    ...(nextStep === 4 ? { final_model: stepModels[4] ?? 'pro', variant_count: variantCount } : {}),
+                    ...(nextStep === 3 ? { final_model: stepModels[3] ?? 'pro', variant_count: variantCount } : {}),
                   });
                 }}
                 stepModels={stepModels}
@@ -168,11 +167,11 @@ export default function ReviewPage() {
                 onContinue={() =>
                   continueRun.mutate({
                     step_model: stepModels[(data.current_step ?? 1) + 1] ?? 'pro',
-                    ...(data.current_step + 1 === 4 ? { final_model: stepModels[4] ?? 'pro', variant_count: variantCount } : {}),
+                    ...(data.current_step + 1 === 3 ? { final_model: stepModels[3] ?? 'pro', variant_count: variantCount } : {}),
                   })
                 }
                 processing={continueRun.isPending}
-                hidden={data.current_step === 2 || data.current_step === 3}
+                hidden={data.current_step === 2}
               />
             ) : null}
             {data?.status === 'succeeded' ? (
@@ -183,7 +182,7 @@ export default function ReviewPage() {
                   variants={variantsHTML}
                   selectedVariant={selectedVariant}
                   onAcceptVariant={async (variant) => {
-                    await updateStep.mutateAsync({ step: 4, content: variant });
+                    await updateStep.mutateAsync({ step: 3, content: variant });
                   }}
                   title={assignment.data?.title || 'Новое задание'}
                 />
@@ -224,7 +223,7 @@ function PipelineResults({
   return (
     <div className="space-y-3">
       {steps.map((step) => {
-        const isEditableCheckpoint = canEdit && step.step === currentStep && (step.step === 2 || step.step === 3);
+        const isEditableCheckpoint = canEdit && step.step === currentStep && step.step === 2;
         return (
           <article key={`${step.step}-${step.key}`} className="overflow-hidden rounded-lg border border-slate-200/80 bg-white/95 shadow-sm">
             <div className="flex flex-col gap-2 border-b border-slate-200/80 bg-[linear-gradient(90deg,#ffffff,rgba(231,229,255,0.58),rgba(223,247,255,0.5))] px-3 py-2 sm:flex-row sm:items-center sm:justify-between">
@@ -234,7 +233,7 @@ function PipelineResults({
                 </span>
                 <h2 className="text-sm font-semibold text-slate-900">{step.title}</h2>
               </div>
-              {canEdit ? (
+              {canEdit && step.step !== 4 ? (
                 <button className="btn-secondary px-3 py-1.5 text-xs" disabled={processing} onClick={() => onRegenerate(step.step)} type="button">
                   {processing ? <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" /> : <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />}
                   Перегенерировать
@@ -247,15 +246,6 @@ function PipelineResults({
                 processing={processing}
                 stepModel={stepModels[3] ?? 'pro'}
                 onStepModelChange={(value) => onStepModelChange(3, value)}
-                onSave={(content) => onSave(step.step, content)}
-                onSaveAndContinue={(content) => onSaveAndContinue(step.step, content)}
-              />
-            ) : isEditableCheckpoint && step.step === 3 ? (
-              <VariationEditor
-                content={step.content}
-                processing={processing}
-                finalModel={stepModels[4] ?? 'pro'}
-                onFinalModelChange={(value) => onStepModelChange(4, value)}
                 variantCount={variantCount}
                 onVariantCountChange={onVariantCountChange}
                 onSave={(content) => onSave(step.step, content)}
@@ -283,6 +273,9 @@ function StepContentView({ step }: { step: PipelineStepResult }) {
       </div>
     );
   }
+  if (step.key === 'parameters') {
+    return <TaskParametersView content={step.content} />;
+  }
   if (isHTMLStep) {
     return (
       <div className="max-h-[500px] overflow-auto bg-white px-5 py-4 text-sm">
@@ -297,66 +290,59 @@ function StepContentView({ step }: { step: PipelineStepResult }) {
   );
 }
 
-const subjectOptions = ['*', 'Русский язык', 'Математика', 'Обществознание', 'Информатика и ИКТ', 'География', 'Биология', 'Физика', 'Химия', 'История', 'Литература', 'Иностранные языки'];
 const taskTypeOptions = ['*', 'Множественный выбор (Multiple choice)', 'Альтернативный выбор (True/False)', 'Перекрестный выбор (Matching)', 'Упорядочение (Rearrangement)', 'Заполнение пропусков (Completion)', 'Вставка слова в нужной форме / Трансформация (Transformation)', 'Ответ на вопрос (Answering questions)', 'Перевод (Translation)', 'Диалог / Интервью (Dialogue / Interview)', 'Обсуждение (Discussion)', 'Написание письма / эссе (Letter / Essay writing)', 'Имитация / Кроссворд / языковые игры (Crossword / Language games)'];
 const classOptions = ['*', ...Array.from({ length: 11 }, (_, index) => String(index + 1))];
 const difficultyOptions = ['*', ...Array.from({ length: 10 }, (_, index) => String(index + 1))];
-const variationOptions = [
-  'замена числовых данных (диапазон, тип чисел — целые, десятичные, дроби)',
-  'изменение порядка перечисления (список условий, объектов, действий)',
-  'синонимическая замена неключевых формулировок',
-  'замена контекста (ситуации, примеры) при сохранении логики',
-  'изменение имён, названий, единиц измерения (без изменения сложности)',
-  'перестановка шагов в многошаговой инструкции',
-];
+
+type TaskParametersItem = {
+  task_number: number;
+  heading: string;
+  task_type: string;
+  school_class: string;
+  difficulty: string;
+};
+
+type ParameterBundle = {
+  tasks: TaskParametersItem[];
+  user_comment?: string;
+};
+
+function TaskParametersView({ content }: { content: string }) {
+  const bundle = parseParameters(content);
+  if (bundle.tasks.length === 0) {
+    return (
+      <pre className="max-h-[420px] overflow-auto whitespace-pre-wrap break-words bg-white p-4 text-sm leading-6 text-slate-800">
+        {content}
+      </pre>
+    );
+  }
+  return (
+    <div className="space-y-3 bg-white p-4">
+      {bundle.tasks.map((task) => (
+        <div key={task.task_number} className="rounded-lg border border-slate-200/80 bg-[linear-gradient(135deg,#ffffff,#f8fbff)] p-4">
+          <div className="text-sm font-semibold text-slate-900">{task.heading || `Задание ${task.task_number}`}</div>
+          <div className="mt-3 grid gap-2 text-sm text-slate-700 sm:grid-cols-3">
+            <div><span className="font-medium text-slate-900">Тип:</span> {task.task_type}</div>
+            <div><span className="font-medium text-slate-900">Класс:</span> {task.school_class}</div>
+            <div><span className="font-medium text-slate-900">Сложность:</span> {task.difficulty}</div>
+          </div>
+        </div>
+      ))}
+      {bundle.user_comment?.trim() ? (
+        <div className="rounded-lg border border-slate-200/80 bg-slate-50 p-4 text-sm text-slate-700">
+          <div className="font-medium text-slate-900">Комментарий к генерации</div>
+          <div className="mt-2 whitespace-pre-wrap">{bundle.user_comment.trim()}</div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
 
 function ParameterEditor({
   content,
   processing,
   stepModel,
   onStepModelChange,
-  onSave,
-  onSaveAndContinue,
-}: {
-  content: string;
-  processing: boolean;
-  stepModel: 'lite' | 'pro';
-  onStepModelChange: (value: 'lite' | 'pro') => void;
-  onSave: (content: string) => Promise<unknown>;
-  onSaveAndContinue: (content: string) => Promise<unknown>;
-}) {
-  const initial = parseParameters(content);
-  const [subject, setSubject] = useState(initial.subject);
-  const [taskType, setTaskType] = useState(initial.taskType);
-  const [schoolClass, setSchoolClass] = useState(initial.schoolClass);
-  const [difficulty, setDifficulty] = useState(initial.difficulty);
-  const value = formatParameters({ subject, taskType, schoolClass, difficulty });
-
-  return (
-    <div className="space-y-4 p-4">
-      <div className="grid gap-3 sm:grid-cols-2">
-        <SelectField label="Предметная область" value={subject} options={subjectOptions} onChange={setSubject} />
-        <SelectField label="Тип задания" value={taskType} options={taskTypeOptions} onChange={setTaskType} />
-        <SelectField label="Предполагаемый класс" value={schoolClass} options={classOptions} onChange={setSchoolClass} />
-        <SelectField label="Уровень сложности" value={difficulty} options={difficultyOptions} onChange={setDifficulty} />
-      </div>
-      <div className="space-y-1.5">
-        <label className="label" htmlFor="step3-model">Модель для следующего шага (шаг 3)</label>
-        <select id="step3-model" className="field" value={stepModel} onChange={(event) => onStepModelChange(event.target.value as 'lite' | 'pro')}>
-          <option value="pro">Pro</option>
-          <option value="lite">Lite</option>
-        </select>
-      </div>
-      <EditorActions processing={processing} onSave={() => onSave(value)} onSaveAndContinue={() => onSaveAndContinue(value)} />
-    </div>
-  );
-}
-
-function VariationEditor({
-  content,
-  processing,
-  finalModel,
-  onFinalModelChange,
   variantCount,
   onVariantCountChange,
   onSave,
@@ -364,87 +350,69 @@ function VariationEditor({
 }: {
   content: string;
   processing: boolean;
-  finalModel: 'lite' | 'pro';
-  onFinalModelChange: (value: 'lite' | 'pro') => void;
+  stepModel: 'lite' | 'pro';
+  onStepModelChange: (value: 'lite' | 'pro') => void;
   variantCount: number;
   onVariantCountChange: (value: number) => void;
   onSave: (content: string) => Promise<unknown>;
   onSaveAndContinue: (content: string) => Promise<unknown>;
 }) {
-  const initial = parseVariationContent(content);
-  const [selected, setSelected] = useState<string[]>(initial.rules);
-  const [custom, setCustom] = useState('');
-  const [comment, setComment] = useState(initial.comment);
-  const value = formatVariationContent(selected, comment);
+  const initial = parseParameters(content);
+  const [tasks, setTasks] = useState(initial.tasks);
+  const [comment, setComment] = useState(initial.user_comment ?? '');
+  const value = formatParameters({ tasks, user_comment: comment });
 
-  function toggle(rule: string) {
-    setSelected((current) => current.includes(rule) ? current.filter((item) => item !== rule) : [...current, rule]);
-  }
-
-  function addCustom() {
-    const next = custom.trim();
-    if (!next || selected.includes(next)) {
-      setCustom('');
-      return;
-    }
-    setSelected((current) => [...current, next]);
-    setCustom('');
+  function updateTask(index: number, field: keyof TaskParametersItem, value: string) {
+    setTasks((current) => current.map((task, taskIndex) => (
+      taskIndex === index ? { ...task, [field]: value } : task
+    )));
   }
 
   return (
     <div className="space-y-4 p-4">
-      <div className="space-y-2">
-        {variationOptions.map((rule) => (
-          <label key={rule} className="flex items-start gap-2 rounded-md border border-slate-200 bg-[linear-gradient(135deg,rgba(255,255,255,0.88),rgba(247,245,255,0.76))] p-3 text-sm text-slate-800 transition hover:border-leaf/30 hover:brightness-105">
-            <input className="mt-1" type="checkbox" checked={selected.includes(rule)} onChange={() => toggle(rule)} />
-            <span>{rule}</span>
-          </label>
-        ))}
-      </div>
-      <div className="space-y-2">
-        {selected.filter((rule) => !variationOptions.includes(rule)).map((rule) => (
-          <div key={rule} className="flex items-center justify-between gap-3 rounded-md border border-slate-200 px-3 py-2 text-sm">
-            <span>{rule}</span>
-            <button className="btn-secondary px-2 py-1" type="button" onClick={() => toggle(rule)}>
-              <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
-            </button>
+      <div className="space-y-4">
+        {tasks.map((task, index) => (
+          <div key={task.task_number} className="rounded-lg border border-slate-200/80 bg-[linear-gradient(135deg,#ffffff,#f8fbff)] p-4">
+            <div className="mb-3 text-sm font-semibold text-slate-900">{task.heading || `Задание ${task.task_number}`}</div>
+            <div className="grid gap-3 sm:grid-cols-3">
+              <SelectField label="Тип задания" value={normalizeTaskType(task.task_type)} options={taskTypeOptions} onChange={(value) => updateTask(index, 'task_type', value)} />
+              <SelectField label="Предполагаемый класс" value={normalizeOption(task.school_class, classOptions)} options={classOptions} onChange={(value) => updateTask(index, 'school_class', value)} />
+              <SelectField label="Уровень сложности" value={normalizeOption(task.difficulty, difficultyOptions)} options={difficultyOptions} onChange={(value) => updateTask(index, 'difficulty', value)} />
+            </div>
           </div>
         ))}
-        <div className="flex gap-2">
-          <input className="field" value={custom} onChange={(event) => setCustom(event.target.value)} placeholder="Добавить свое допустимое изменение" />
-          <button className="btn-secondary" type="button" onClick={addCustom}>
-            <Plus className="h-4 w-4" aria-hidden="true" />
-          </button>
+      </div>
+      <div className="space-y-1.5">
+        <label className="label" htmlFor="generation-comment">Комментарий к генерации</label>
+        <textarea
+          id="generation-comment"
+          className="field min-h-24"
+          value={comment}
+          onChange={(event) => setComment(event.target.value)}
+          placeholder="Например: сохранить количество пунктов и формат вариантов ответов"
+        />
+      </div>
+      <div className="grid gap-3 sm:grid-cols-2">
+        <div className="space-y-1.5">
+          <label className="label" htmlFor="step3-model">Модель для генерации (шаг 3)</label>
+          <select id="step3-model" className="field" value={stepModel} onChange={(event) => onStepModelChange(event.target.value as 'lite' | 'pro')}>
+            <option value="pro">Pro</option>
+            <option value="lite">Lite</option>
+          </select>
         </div>
-      </div>
-      <div className="space-y-1.5">
-        <label className="label" htmlFor="variation-comment">Комментарий к генерации</label>
-        <textarea id="variation-comment" className="field min-h-24" value={comment} onChange={(event) => setComment(event.target.value)} placeholder="Например: сохранить формат ответов, не менять количество пунктов" />
-      </div>
-      <div className="space-y-1.5">
-        <label className="label" htmlFor="final-model">Модель для шага 4 (финальный вариант)</label>
-        <select
-          id="final-model"
-          className="field"
-          value={finalModel}
-          onChange={(event) => onFinalModelChange(event.target.value as 'lite' | 'pro')}
-        >
-          <option value="pro">Pro</option>
-          <option value="lite">Lite</option>
-        </select>
-      </div>
-      <div className="space-y-1.5">
-        <label className="label" htmlFor="variant-count">Количество новых вариантов (1-10)</label>
-        <select
-          id="variant-count"
-          className="field"
-          value={variantCount}
-          onChange={(event) => onVariantCountChange(Number(event.target.value))}
-        >
-          {Array.from({ length: 10 }, (_, index) => index + 1).map((count) => (
-            <option key={count} value={count}>{count}</option>
-          ))}
-        </select>
+        <div className="space-y-1.5">
+          <label className="label" htmlFor="variant-count">Количество новых вариантов (1-10)</label>
+          <select
+            id="variant-count"
+            className="field"
+            value={variantCount}
+            onChange={(event) => onVariantCountChange(Number(event.target.value))}
+          >
+            {Array.from({ length: 10 }, (_, index) => index + 1).map((count) => (
+              <option key={count} value={count}>{count}</option>
+            ))}
+          </select>
+        </div>
       </div>
       <EditorActions processing={processing} onSave={() => onSave(value)} onSaveAndContinue={() => onSaveAndContinue(value)} />
     </div>
@@ -748,16 +716,26 @@ function safeFilename(value: string) {
 }
 
 function parseParameters(content: string) {
-  const get = (label: string) => {
-    const line = content.split(/\r?\n/).find((item) => item.toLowerCase().startsWith(label.toLowerCase()));
-    return line?.slice(label.length).replace(/^:\s*/, '').trim() || '*';
-  };
-  return {
-    subject: normalizeOption(get('Предметная область'), subjectOptions),
-    taskType: normalizeOption(get('Тип задания'), taskTypeOptions),
-    schoolClass: normalizeOption(get('Предполагаемый класс'), classOptions),
-    difficulty: normalizeOption(get('Уровень сложности задания'), difficultyOptions),
-  };
+  try {
+    const parsed = JSON.parse(content) as ParameterBundle;
+    return {
+      tasks: Array.isArray(parsed.tasks) && parsed.tasks.length > 0
+        ? parsed.tasks.map((task, index) => ({
+            task_number: task.task_number ?? index + 1,
+            heading: task.heading ?? `Задание ${index + 1}`,
+            task_type: normalizeTaskType(task.task_type ?? '*'),
+            school_class: normalizeOption(task.school_class ?? '*', classOptions),
+            difficulty: normalizeOption(task.difficulty ?? '*', difficultyOptions),
+          }))
+        : [],
+      user_comment: parsed.user_comment ?? '',
+    };
+  } catch {
+    return {
+      tasks: [],
+      user_comment: '',
+    };
+  }
 }
 
 function normalizeOption(value: string, options: string[]) {
@@ -767,32 +745,18 @@ function normalizeOption(value: string, options: string[]) {
   return '*';
 }
 
-function formatParameters(values: { subject: string; taskType: string; schoolClass: string; difficulty: string }) {
-  return [
-    `Предметная область: ${values.subject}`,
-    `Тип задания: ${values.taskType}`,
-    `Предполагаемый класс: ${values.schoolClass}`,
-    `Уровень сложности задания: ${values.difficulty}`,
-  ].join('\n');
+function normalizeTaskType(value: string) {
+  if (taskTypeOptions.includes(value)) {
+    return value;
+  }
+  if (value === 'Множественный выбор (Multiple choicef)') {
+    return 'Множественный выбор (Multiple choice)';
+  }
+  return '*';
 }
 
-function parseVariationContent(content: string) {
-  const [rulesText, commentText = ''] = content.split(/\n+Комментарий пользователя:\s*/i);
-  const rules = rulesText
-    .split(',')
-    .map((item) => item.trim())
-    .filter(Boolean);
-  return {
-    rules: rules.length > 0 ? rules : variationOptions.slice(0, 1),
-    comment: commentText.trim(),
-  };
-}
-
-function formatVariationContent(rules: string[], comment: string) {
-  const uniqueRules = Array.from(new Set(rules.map((rule) => rule.trim()).filter(Boolean)));
-  const base = uniqueRules.length > 0 ? uniqueRules.join(', ') : '-';
-  const cleanComment = comment.trim();
-  return cleanComment ? `${base}\n\nКомментарий пользователя:\n${cleanComment}` : base;
+function formatParameters(values: ParameterBundle) {
+  return JSON.stringify(values, null, 2);
 }
 
 function statusLabel(status: string) {

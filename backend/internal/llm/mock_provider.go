@@ -68,8 +68,15 @@ func (p *MockProvider) AnalyzeAssignmentImage(ctx context.Context, req AnalyzeAs
 }
 
 func (p *MockProvider) ConvertAssignmentImageToMarkdown(ctx context.Context, req ConvertAssignmentImageToMarkdownRequest) (*TextGenerationResponse, error) {
-	content := `<section>
+	content := `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>English Grammar Test</title>
+</head>
+<body>
   <h1>English Grammar Test</h1>
+  <h2>Task 1</h2>
   <p>Choose the correct answer.</p>
   <ol>
     <li>She ___ to school yesterday.
@@ -79,7 +86,18 @@ func (p *MockProvider) ConvertAssignmentImageToMarkdown(ctx context.Context, req
       <ul><li>plays</li><li>play</li><li>played</li></ul>
     </li>
   </ol>
-</section>`
+  <h2>Task 2</h2>
+  <p>Match the questions with the answers.</p>
+  <ol>
+    <li>How old are you?</li>
+    <li>Where do you live?</li>
+  </ol>
+  <ul>
+    <li>A. In London.</li>
+    <li>B. I am twelve.</li>
+  </ul>
+</body>
+</html>`
 
 	return &TextGenerationResponse{
 		RawResponse: content,
@@ -90,16 +108,31 @@ func (p *MockProvider) ConvertAssignmentImageToMarkdown(ctx context.Context, req
 }
 
 func (p *MockProvider) GenerateAssignmentText(ctx context.Context, req GenerateAssignmentTextRequest) (*TextGenerationResponse, error) {
-	content := "Предметная область: Иностранные языки\nТип задания: Множественный выбор (Multiple choice)\nПредполагаемый класс: 5\nУровень сложности задания: 3"
-	if strings.Contains(req.Prompt, "Допустимый характер вариации") {
-		content = "синонимическая замена неключевых формулировок, изменение порядка перечисления"
-	}
-	if strings.Contains(req.Prompt, "создать") && strings.Contains(req.Prompt, "новых вариантов") {
-		content = `{"variants":[
-  "<section><h1>English Grammar Test</h1><p>Choose the correct answer.</p><ol><li>He ___ breakfast at seven yesterday.<ul><li>have</li><li>had</li><li>has</li></ul></li><li>We ___ English on Mondays.<ul><li>studies</li><li>study</li><li>studied</li></ul></li></ol></section>",
-  "<section><h1>English Grammar Test</h1><p>Choose the correct answer.</p><ol><li>My sister ___ TV last night.<ul><li>watch</li><li>watched</li><li>watches</li></ul></li><li>They ___ chess after class.<ul><li>plays</li><li>play</li><li>played</li></ul></li></ol></section>",
-  "<section><h1>English Grammar Test</h1><p>Choose the correct answer.</p><ol><li>Tom ___ to school by bus yesterday.<ul><li>go</li><li>went</li><li>goes</li></ul></li><li>We ___ English every Thursday.<ul><li>learns</li><li>learn</li><li>learned</li></ul></li></ol></section>"
-] }`
+	content := "Тип задания: Множественный выбор (Multiple choice)\nПредполагаемый класс: 5\nУровень сложности задания: 3"
+	if strings.Contains(req.Prompt, "создать ещё один новый вариант") {
+		if strings.Contains(req.Prompt, "Match the questions") {
+			content = `<h2>Task 2</h2>
+<p>Match the questions with the answers.</p>
+<ol>
+  <li>What is your favourite subject?</li>
+  <li>When do you get up?</li>
+</ol>
+<ul>
+  <li>A. At seven o'clock.</li>
+  <li>B. English.</li>
+</ul>`
+		} else {
+			content = `<h2>Task 1</h2>
+<p>Choose the correct answer.</p>
+<ol>
+  <li>He ___ breakfast at seven yesterday.
+    <ul><li>have</li><li>had</li><li>has</li></ul>
+  </li>
+  <li>We ___ English on Mondays.
+    <ul><li>studies</li><li>study</li><li>studied</li></ul>
+  </li>
+</ol>`
+		}
 	}
 	if strings.Contains(req.Prompt, "итоговую оценку") && strings.Contains(req.Prompt, "эталонный учебный вариант") {
 		content = "8"

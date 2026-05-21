@@ -16,9 +16,9 @@ import (
 	"teacher-assistant/backend/internal/llm"
 )
 
-const totalPipelineSteps = 5
-const generationStep = 4
-const evaluationStep = 5
+const totalPipelineSteps = 4
+const generationStep = 3
+const evaluationStep = 4
 
 var scorePattern = regexp.MustCompile(`\b(10|[1-9])\b`)
 
@@ -56,13 +56,33 @@ type pipelineStepResult struct {
 type pipelineContent struct {
 	SourceHTML      string               `json:"source_html,omitempty"`
 	Parameters      string               `json:"parameters,omitempty"`
-	VariationRules  string               `json:"variation_rules,omitempty"`
 	VariantHTML     string               `json:"variant_html,omitempty"`
 	VariantsHTML    []string             `json:"variants_html,omitempty"`
 	SelectedVariant int                  `json:"selected_variant,omitempty"`
 	SelfScore       string               `json:"self_score,omitempty"`
 	UsedDefaultHTML bool                 `json:"used_default_html,omitempty"`
 	Steps           []pipelineStepResult `json:"steps"`
+}
+
+type taskParameters struct {
+	TaskNumber  int    `json:"task_number"`
+	Heading     string `json:"heading"`
+	TaskType    string `json:"task_type"`
+	SchoolClass string `json:"school_class"`
+	Difficulty  string `json:"difficulty"`
+}
+
+type parameterBundle struct {
+	Tasks       []taskParameters `json:"tasks"`
+	UserComment string           `json:"user_comment,omitempty"`
+}
+
+type taskSection struct {
+	Number  int
+	Heading string
+	HTML    string
+	Start   int
+	End     int
 }
 
 func NewService(store *db.Store, storage *files.LocalStorage, provider llm.VisionProvider, logger *slog.Logger) *Service {
@@ -382,46 +402,130 @@ func (s *Service) runStep(ctx context.Context, run db.ExtractionRun, step int, r
 		if sourceHTML == "" {
 			return nil, pipelineStepResult{}, nil, mustJSON(input), errors.New("step 1 result is missing")
 		}
-		prompt := parametersPrompt(sourceHTML)
-		input["prompt"] = prompt
-		resp, err = s.provider.GenerateAssignmentText(ctx, llm.GenerateAssignmentTextRequest{
-			Prompt:        prompt,
-			PromptVersion: PromptVersion,
-			Model:         stepModel,
-		})
+		sections, splitErr := extractTaskSections(sourceHTML)
+		if splitErr != nil {
+			return nil, pipelineStepResult{}, nil, mustJSON(input), splitErr
+		}
+		tasks := make([]taskParameters, 0, len(sections))
+		rawOutputs := make([]map[string]any, 0, len(sections))
+		for _, section := range sections {
+			prompt := parametersPrompt(section.HTML)
+			taskResp, taskErr := s.provider.GenerateAssignmentText(ctx, llm.GenerateAssignmentTextRequest{
+				Prompt:        prompt,
+				PromptVersion: PromptVersion,
+				Model:         stepModel,
+			})
+			if taskErr != nil {
+				return taskResp, pipelineStepResult{}, nil, mustJSON(input), taskErr
+			}
+			params := parseTaskParameters(normalizeLLMText(taskResp.Content))
+			params.TaskNumber = section.Number
+			params.Heading = section.Heading
+			tasks = append(tasks, params)
+			rawOutputs = append(rawOutputs, map[string]any{
+				"task_number": section.Number,
+				"heading":     section.Heading,
+				"content":     normalizeLLMText(taskResp.Content),
+				"provider":    taskResp.Provider,
+				"model":       taskResp.Model,
+			})
+			resp = taskResp
+		}
+		serialized := string(mustIndentJSON(parameterBundle{Tasks: tasks}))
+		input["task_count"] = len(sections)
+		input["tasks"] = sections
+		result := pipelineStepResult{
+			Step:      step,
+			Key:       pipelineStepKey(step),
+			Title:     pipelineStepTitle(step),
+			Content:   serialized,
+			CreatedAt: time.Now().UTC().Format(time.RFC3339),
+		}
+		return &llm.TextGenerationResponse{
+			RawResponse: string(mustIndentJSON(rawOutputs)),
+			Content:     serialized,
+			Provider:    providerValue(resp),
+			Model:       modelValue(resp, stepModel),
+		}, result, nil, mustJSON(input), nil
 	case 3:
 		sourceHTML := resultContent(results, "source_html")
 		parameters := resultContent(results, "parameters")
 		if sourceHTML == "" || parameters == "" {
 			return nil, pipelineStepResult{}, nil, mustJSON(input), errors.New("previous pipeline results are missing")
 		}
-		prompt := variationRulesPrompt(sourceHTML, parameters)
-		input["prompt"] = prompt
-		resp, err = s.provider.GenerateAssignmentText(ctx, llm.GenerateAssignmentTextRequest{
-			Prompt:        prompt,
-			PromptVersion: PromptVersion,
-			Model:         stepModel,
-		})
-	case 4:
-		sourceHTML := resultContent(results, "source_html")
-		parameters := resultContent(results, "parameters")
-		variationRules := resultContent(results, "variation_rules")
-		if sourceHTML == "" || parameters == "" || variationRules == "" {
-			return nil, pipelineStepResult{}, nil, mustJSON(input), errors.New("previous pipeline results are missing")
+		sections, splitErr := extractTaskSections(sourceHTML)
+		if splitErr != nil {
+			return nil, pipelineStepResult{}, nil, mustJSON(input), splitErr
 		}
-		prompt := variantsPrompt(sourceHTML, parameters, variationRules, variantCount)
-		input["prompt"] = prompt
-		input["variant_count"] = variantCount
+		bundle, parseErr := parseParameterBundle(parameters)
+		if parseErr != nil {
+			return nil, pipelineStepResult{}, nil, mustJSON(input), parseErr
+		}
+		if len(bundle.Tasks) != len(sections) {
+			return nil, pipelineStepResult{}, nil, mustJSON(input), fmt.Errorf("expected %d task parameter sets, got %d", len(sections), len(bundle.Tasks))
+		}
 		model := finalModel
 		if model == "" {
 			model = stepModel
 		}
-		resp, err = s.provider.GenerateAssignmentText(ctx, llm.GenerateAssignmentTextRequest{
-			Prompt:        prompt,
-			PromptVersion: PromptVersion,
-			Model:         model,
-		})
-	case 5:
+		input["variant_count"] = variantCount
+		input["task_count"] = len(sections)
+		input["tasks"] = bundle.Tasks
+		input["user_comment"] = bundle.UserComment
+		fullVariants := make([]string, 0, variantCount)
+		rawOutputs := make([]map[string]any, 0, variantCount)
+		for variantIndex := 0; variantIndex < variantCount; variantIndex++ {
+			generatedTasks := make([]string, 0, len(sections))
+			taskOutputs := make([]map[string]any, 0, len(sections))
+			for sectionIndex, section := range sections {
+				params := bundle.Tasks[sectionIndex]
+				prompt := generationPrompt(section.HTML, params, bundle.UserComment)
+				taskResp, taskErr := s.provider.GenerateAssignmentText(ctx, llm.GenerateAssignmentTextRequest{
+					Prompt:        prompt,
+					PromptVersion: PromptVersion,
+					Model:         model,
+				})
+				if taskErr != nil {
+					return taskResp, pipelineStepResult{}, nil, mustJSON(input), taskErr
+				}
+				taskHTML := normalizeLLMText(taskResp.Content)
+				if !containsTag(taskHTML, "h2") {
+					taskHTML = ensureSectionHeading(section.HTML, taskHTML)
+				}
+				generatedTasks = append(generatedTasks, taskHTML)
+				taskOutputs = append(taskOutputs, map[string]any{
+					"task_number": params.TaskNumber,
+					"heading":     params.Heading,
+					"content":     taskHTML,
+					"provider":    taskResp.Provider,
+					"model":       taskResp.Model,
+				})
+				resp = taskResp
+			}
+			fullVariant, mergeErr := mergeTaskSections(sourceHTML, sections, generatedTasks)
+			if mergeErr != nil {
+				return resp, pipelineStepResult{}, nil, mustJSON(input), mergeErr
+			}
+			fullVariants = append(fullVariants, fullVariant)
+			rawOutputs = append(rawOutputs, map[string]any{
+				"variant_index": variantIndex + 1,
+				"tasks":         taskOutputs,
+			})
+		}
+		result := pipelineStepResult{
+			Step:      step,
+			Key:       pipelineStepKey(step),
+			Title:     pipelineStepTitle(step),
+			Content:   fullVariants[0],
+			CreatedAt: time.Now().UTC().Format(time.RFC3339),
+		}
+		return &llm.TextGenerationResponse{
+			RawResponse: string(mustIndentJSON(rawOutputs)),
+			Content:     fullVariants[0],
+			Provider:    providerValue(resp),
+			Model:       modelValue(resp, model),
+		}, result, fullVariants, mustJSON(input), nil
+	case 4:
 		sourceHTML := resultContent(results, "source_html")
 		variantHTML := resultContent(results, "variant_html")
 		if sourceHTML == "" || variantHTML == "" {
@@ -444,13 +548,6 @@ func (s *Service) runStep(ctx context.Context, run db.ExtractionRun, step int, r
 	content := normalizeLLMText(resp.Content)
 	variants := []string(nil)
 	if step == 4 {
-		variants = parseHTMLVariants(content)
-		if len(variants) == 0 {
-			variants = []string{content}
-		}
-		content = variants[0]
-	}
-	if step == 5 {
 		content = strconv.Itoa(extractScore(content))
 	}
 	result := pipelineStepResult{
@@ -585,12 +682,11 @@ func parsePipelineContent(raw json.RawMessage) pipelineContent {
 
 func buildPipelineContent(results []pipelineStepResult) pipelineContent {
 	return pipelineContent{
-		SourceHTML:     resultContent(results, "source_html"),
-		Parameters:     resultContent(results, "parameters"),
-		VariationRules: resultContent(results, "variation_rules"),
-		VariantHTML:    resultContent(results, "variant_html"),
-		SelfScore:      resultContent(results, "self_score"),
-		Steps:          results,
+		SourceHTML:  resultContent(results, "source_html"),
+		Parameters:  resultContent(results, "parameters"),
+		VariantHTML: resultContent(results, "variant_html"),
+		SelfScore:   resultContent(results, "self_score"),
+		Steps:       results,
 	}
 }
 
@@ -637,42 +733,176 @@ func resolveVariantCount(count int) (int, error) {
 	return count, nil
 }
 
-func parseHTMLVariants(content string) []string {
-	content = strings.TrimSpace(content)
-	if content == "" {
-		return nil
+func parseTaskParameters(content string) taskParameters {
+	return taskParameters{
+		TaskType:    extractLabeledValue(content, "Тип задания"),
+		SchoolClass: extractLabeledValue(content, "Предполагаемый класс"),
+		Difficulty:  extractLabeledValue(content, "Уровень сложности задания"),
 	}
-	content = strings.TrimPrefix(content, "```json")
-	content = strings.TrimPrefix(content, "```")
-	content = strings.TrimSuffix(content, "```")
-	content = strings.TrimSpace(content)
+}
 
-	var wrapper struct {
-		Variants []string `json:"variants"`
+func parseParameterBundle(content string) (parameterBundle, error) {
+	content = normalizeLLMText(content)
+	var bundle parameterBundle
+	if err := json.Unmarshal([]byte(content), &bundle); err != nil {
+		return parameterBundle{}, fmt.Errorf("failed to parse step 2 parameters: %w", err)
 	}
-	if err := json.Unmarshal([]byte(content), &wrapper); err == nil && len(wrapper.Variants) > 0 {
-		clean := make([]string, 0, len(wrapper.Variants))
-		for _, variant := range wrapper.Variants {
-			trimmed := strings.TrimSpace(variant)
-			if trimmed != "" {
-				clean = append(clean, trimmed)
+	if len(bundle.Tasks) == 0 {
+		return parameterBundle{}, errors.New("step 2 parameters contain no tasks")
+	}
+	return bundle, nil
+}
+
+func formatTaskParameters(params taskParameters) string {
+	return strings.Join([]string{
+		"Тип задания: " + valueOrStar(params.TaskType),
+		"Предполагаемый класс: " + valueOrStar(params.SchoolClass),
+		"Уровень сложности задания: " + valueOrStar(params.Difficulty),
+	}, "\n")
+}
+
+func extractLabeledValue(content, label string) string {
+	for _, line := range strings.Split(content, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(strings.ToLower(line), strings.ToLower(label)) {
+			parts := strings.SplitN(line, ":", 2)
+			if len(parts) == 2 {
+				return strings.TrimSpace(parts[1])
 			}
 		}
-		return clean
 	}
+	return "*"
+}
 
-	var direct []string
-	if err := json.Unmarshal([]byte(content), &direct); err == nil && len(direct) > 0 {
-		clean := make([]string, 0, len(direct))
-		for _, variant := range direct {
-			trimmed := strings.TrimSpace(variant)
-			if trimmed != "" {
-				clean = append(clean, trimmed)
-			}
-		}
-		return clean
+func valueOrStar(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "*"
 	}
-	return nil
+	return value
+}
+
+func extractTaskSections(sourceHTML string) ([]taskSection, error) {
+	lower := strings.ToLower(sourceHTML)
+	trailingStart := len(sourceHTML)
+	if bodyClose := strings.LastIndex(lower, "</body>"); bodyClose >= 0 {
+		trailingStart = bodyClose
+	} else if htmlClose := strings.LastIndex(lower, "</html>"); htmlClose >= 0 {
+		trailingStart = htmlClose
+	}
+	var starts []int
+	searchFrom := 0
+	for {
+		index := strings.Index(lower[searchFrom:], "<h2")
+		if index < 0 {
+			break
+		}
+		starts = append(starts, searchFrom+index)
+		searchFrom += index + 3
+	}
+	if len(starts) == 0 {
+		return nil, errors.New("no task sections with <h2> were found in source html")
+	}
+	sections := make([]taskSection, 0, len(starts))
+	for i, start := range starts {
+		end := trailingStart
+		if i+1 < len(starts) {
+			end = starts[i+1]
+		}
+		sectionHTML := strings.TrimSpace(sourceHTML[start:end])
+		sections = append(sections, taskSection{
+			Number:  i + 1,
+			Heading: extractTaskHeading(sectionHTML),
+			HTML:    sectionHTML,
+			Start:   start,
+			End:     end,
+		})
+	}
+	return sections, nil
+}
+
+func extractTaskHeading(sectionHTML string) string {
+	lower := strings.ToLower(sectionHTML)
+	start := strings.Index(lower, "<h2")
+	if start < 0 {
+		return ""
+	}
+	openEnd := strings.Index(lower[start:], ">")
+	if openEnd < 0 {
+		return ""
+	}
+	contentStart := start + openEnd + 1
+	closeIndex := strings.Index(lower[contentStart:], "</h2>")
+	if closeIndex < 0 {
+		return ""
+	}
+	return strings.TrimSpace(stripTags(sectionHTML[contentStart : contentStart+closeIndex]))
+}
+
+func stripTags(value string) string {
+	replacer := regexp.MustCompile(`(?is)<[^>]+>`)
+	return strings.TrimSpace(replacer.ReplaceAllString(value, " "))
+}
+
+func mergeTaskSections(sourceHTML string, sections []taskSection, replacements []string) (string, error) {
+	if len(sections) != len(replacements) {
+		return "", errors.New("task replacement count does not match source task count")
+	}
+	var builder strings.Builder
+	builder.WriteString(sourceHTML[:sections[0].Start])
+	for index, section := range sections {
+		builder.WriteString(strings.TrimSpace(replacements[index]))
+		if index+1 < len(sections) {
+			builder.WriteString(sourceHTML[section.End:sections[index+1].Start])
+			continue
+		}
+		builder.WriteString(sourceHTML[section.End:])
+	}
+	return builder.String(), nil
+}
+
+func containsTag(content, tag string) bool {
+	return strings.Contains(strings.ToLower(content), "<"+strings.ToLower(tag))
+}
+
+func ensureSectionHeading(originalSection, generated string) string {
+	lower := strings.ToLower(originalSection)
+	start := strings.Index(lower, "<h2")
+	if start < 0 {
+		return generated
+	}
+	openEnd := strings.Index(lower[start:], ">")
+	if openEnd < 0 {
+		return generated
+	}
+	closeIndex := strings.Index(lower[start+openEnd+1:], "</h2>")
+	if closeIndex < 0 {
+		return generated
+	}
+	headingHTML := originalSection[start : start+openEnd+1+closeIndex+5]
+	return headingHTML + "\n" + strings.TrimSpace(generated)
+}
+
+func mustIndentJSON(value any) []byte {
+	data, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return []byte("{}")
+	}
+	return data
+}
+
+func providerValue(resp *llm.TextGenerationResponse) string {
+	if resp == nil || resp.Provider == "" {
+		return "unknown"
+	}
+	return resp.Provider
+}
+
+func modelValue(resp *llm.TextGenerationResponse, fallback string) string {
+	if resp != nil && resp.Model != "" {
+		return resp.Model
+	}
+	return fallback
 }
 
 func extractScore(content string) int {
@@ -708,10 +938,8 @@ func pipelineStepKey(step int) string {
 	case 2:
 		return "parameters"
 	case 3:
-		return "variation_rules"
-	case 4:
 		return "variant_html"
-	case 5:
+	case 4:
 		return "self_score"
 	default:
 		return "unknown"
@@ -725,10 +953,8 @@ func pipelineStepTitle(step int) string {
 	case 2:
 		return "Параметры задания"
 	case 3:
-		return "Допустимые изменения"
-	case 4:
 		return "Новый вариант задания (HTML)"
-	case 5:
+	case 4:
 		return "Самооценка результата"
 	default:
 		return "Шаг пайплайна"
@@ -770,88 +996,111 @@ func normalizeLLMText(content string) string {
 }
 
 func htmlFromImagePrompt() string {
-	return `Я отправляю тебе школьное задание. Преобразуй его в валидный HTML для печати.
+	return `Я отправляю тебе файл с вариантом школьной проверочной работы по английскому языку. Распознай текст и преобразуй его в корректный HTML-документ.
 
 Требования:
-- Верни только HTML без markdown и без пояснений.
-- Используй семантическую разметку: h1-h3, p, ul/ol/li, table при необходимости.
-- Не добавляй <html>, <head>, <body>, верни только содержимое документа.
-- Сохрани структуру и формулировки задания, ничего не решай и не улучшай.`
+1. Сначала полностью распознай текст из изображения или PDF, затем преобразуй его в HTML.
+2. В ответе пришли только содержимое HTML-файла без пояснений и комментариев.
+3. Не решай задания и не изменяй их формулировки.
+4. Сохраняй исходную структуру, порядок, нумерацию и текст полностью, ничего не удаляй и не переводи на другие языки
+5. Сгенерируй полноценный HTML-документ по правилам HTML5:
+   - обязательно добавь <!DOCTYPE html>;
+   - используй теги <html>, <head> и <body>;
+   - в <head> добавь <meta charset="UTF-8">;
+   - добавь осмысленный <title>.
+6. Каждое самостоятельное задание помещай под отдельный заголовок второго уровня (<h2>).
+7. Не разделяй одно задание на несколько заголовков:
+   - текст и вопросы/подзадания к нему являются одним заданием;
+   - диалог и задания к нему являются одним заданием;
+   - таблица, текст, варианты ответов и связанные с ними вопросы являются одним заданием.
+8. Если вся работа состоит только из одного текста с несколькими вопросами или подзаданиями, оформи всё под одним заголовком <h2>.
+9. Вопросы внутри одного задания не оформляй как отдельные задания и не создавай для них отдельные <h2>.
+10. Используй семантически подходящие HTML-теги:
+   - <p> для абзацев;
+   - <ol>, <ul>, <li> для списков;
+   - <table>, <tr>, <td> для таблиц;
+   - <strong>, <em> при необходимости.
+11. Старайся сохранять визуальную структуру оригинала: переносы строк, списки, подпункты, варианты ответов и таблицы.
+12. Ответ оформи только в виде одного блока кода с triple backticks в начале и в конце.`
 }
 
-func parametersPrompt(sourceHTML string) string {
-	return `Я отправляю тебе задание в виде HTML файла. По данным из файла определи параметры, которые я опишу ниже. Выбери один вариант из списка возможных значений, если они указаны. Если значение параметра определить не удалось, используй "*".
+func parametersPrompt(taskHTML string) string {
+	return `Я отправляю тебе задание из школьной проверочной по английскому языку в виде html заголовка второго уровня. По данным из файла определи параметры, которые я опишу ниже. Выбери один вариант из списка возможных значений (если они указаны), если значение параметра определить не удалось используй "*". 
 
 Параметры
-Предметная область: Русский язык | Математика | Обществознание | Информатика и ИКТ | География | Биология | Физика | Химия | История | Литература | Иностранные языки
 
-Тип задания: Множественный выбор (Multiple choice) | Альтернативный выбор (True/False) | Перекрестный выбор (Matching) | Упорядочение (Rearrangement) | Заполнение пропусков (Completion) | Вставка слова в нужной форме / Трансформация (Transformation) | Ответ на вопрос (Answering questions) | Перевод (Translation) | Диалог / Интервью (Dialogue / Interview) | Обсуждение (Discussion) | Написание письма / эссе (Letter / Essay writing) | Имитация / Кроссворд / языковые игры (Crossword / Language games)
+Тип задания: Множественный выбор (Multiple choicef) | Альтернативный выбор (True/False) | Перекрестный выбор (Matching) | Упорядочение (Rearrangement) | Заполнение пропусков (Completion) | Вставка слова в нужной форме / Трансформация (Transformation) | Ответ на вопрос (Answering questions) | Перевод (Translation) | Диалог / Интервью (Dialogue / Interview) | Обсуждение (Discussion) | Написание письма / эссе (Letter / Essay writing)
 
 Предполагаемый класс: 1-11
 
 Уровень сложности задания: 1-10
 
-В ответе перечисли только эти параметры и их значения. Писать свои комментарии и дополнительный текст не нужно.
+в ответе перечисли только эти параметры и их значения. Писать свои комментарии и дополнительный текст не нужно. Пример вывода:
 
-Пример вывода:
-Предметная область: Иностранные языки
 Тип задания: Перекрестный выбор (Matching)
 Предполагаемый класс: 10
 Уровень сложности задания: 7
 
-<результат step1_html>
-` + sourceHTML + `
-</результат step1_html>`
+<task_html>
+` + taskHTML + `
+</task_html>`
 }
 
-func variationRulesPrompt(sourceHTML, parameters string) string {
-	return `Я отправляю тебе задание в виде HTML файла. Необходимо на его основе создать ещё один новый вариант такого же задания за счет допустимых изменений. Было определено, что это задание имеет следующие параметры:
+func generationPrompt(taskHTML string, params taskParameters, userComment string) string {
+	prompt := `Я отправляю тебе задание в виде HTML под заголовком второго уровня. Необходимо на его основе создать ещё один новый вариант такого же задания.
 
-<результат step2>
-` + parameters + `
-</результат step2>
+Было определено, что это задание имеет следующие параметры:
 
-Допустимый характер вариации (можно выбрать несколько): замена числовых данных (диапазон, тип чисел — целые, десятичные, дроби), изменение порядка перечисления (список условий, объектов, действий), синонимическая замена неключевых формулировок, замена контекста (ситуации, примеры) при сохранении логики, изменение имён, названий, единиц измерения (без изменения сложности), перестановка шагов в многошаговой инструкции.
+<params>
+` + formatTaskParameters(params) + `
+</params>
 
-В качестве ответа пришли только список допустимых вариаций изменений этого задания без дополнительного текста и без твоих комментариев.
-
-Пример ответа:
-замена числовых данных (диапазон, тип чисел — целые, десятичные, дроби), перестановка шагов в многошаговой инструкции
-
-<результат step1_html>
-` + sourceHTML + `
-</результат step1_html>`
-}
-
-func variantsPrompt(sourceHTML, parameters, variationRules string, variantCount int) string {
-	return fmt.Sprintf(`Я отправляю тебе задание в виде HTML файла. Необходимо на его основе создать %d новых вариантов такого же задания. Было определено, что это задание имеет следующие параметры:
-
-<результат step2>
-`+parameters+`
-</результат step2>
-
-Определи части задания, которые можно изменять, а какие нельзя, например формулировка задания, нумерация, индексы букв и пр., чтобы избежать нарушения логики.
-
-Также определено, что нельзя менять следующий текст (если тут стоит "-", то изменения допустимы на твое усмотрение):
+Перед генерацией нового варианта:
+1. Определи, какие части задания можно изменять, а какие нельзя, чтобы не нарушить структуру и логику задания.
+2. Не изменяй:
+   - тип задания;
+   - структуру задания;
+   - способ оформления;
+   - количество элементов, если это важно для логики;
+   - индексы букв, цифр и обозначений, если их изменение может нарушить соответствия.
+3. Следующий текст запрещено изменять (если указан "-", изменения допустимы на твоё усмотрение):
 -
 
-Допустимые изменения в задании для создания новых вариантов:
-`+variationRules+`
+Допустимые изменения для создания нового варианта:
+- замена контекста и ситуации при сохранении логики;
+- изменение имён, названий, мест, предметов;
+- изменение порядка элементов;
+- синонимическая замена неключевых формулировок;
+- замена текста, вопросов и вариантов ответов на новые аналогичного уровня сложности;
+- изменение деталей без изменения типа навыка и сложности задания.
 
-Верни JSON строго в одном из форматов:
-1) {"variants": ["<section>...</section>", "..."]}
-или
-2) ["<section>...</section>", "..."]
+ВАЖНО:
+1. Если в оригинале инструкция к заданию написана на русском языке — сохрани инструкцию на русском языке.
+2. Всё содержимое самого задания по английскому языку должно быть только на английском языке:
+   - тексты;
+   - диалоги;
+   - вопросы;
+   - варианты ответов;
+   - слова и фразы для сопоставления.
+3. Не переводи английское содержимое задания на русский язык.
+4. Новый вариант должен быть полностью новым по содержанию, но аналогичным по структуре, формату и уровню сложности.
+5. Не добавляй ответы, пояснения или решения.`
 
-Требования:
-- Вариантов должно быть ровно %d.
-- Каждый вариант должен быть валидным HTML-фрагментом (без html/head/body).
-- Решать задания не нужно.
-- Без дополнительного текста, только JSON.
+	if strings.TrimSpace(userComment) != "" {
+		prompt += `
 
-<результат step1_html>
-`+sourceHTML+`
-</результат step1_html>`, variantCount, variantCount)
+Дополнительный комментарий пользователя:
+` + strings.TrimSpace(userComment)
+	}
+
+	prompt += `
+
+В качестве ответа пришли только содержимое нового варианта  в html-формате под заголовком второго уровня без дополнительного текста и комментариев.
+
+<task_html>
+` + taskHTML + `
+</task_html>`
+	return prompt
 }
 
 func selfEvaluationPrompt(sourceHTML, variantHTML string) string {
@@ -880,7 +1129,15 @@ func selfEvaluationPrompt(sourceHTML, variantHTML string) string {
 }
 
 func defaultSourceHTML() string {
-	return `<h1>Тема 10 № 39</h1>
+	return `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Тема 10 № 39</title>
+</head>
+<body>
+<h1>Тема 10 № 39</h1>
+<h2>Задание 1</h2>
 <p>Установите соответствие между заголовками 1-8 и текстами A-G. Запишите свои ответы в таблицу. Используйте каждую цифру только один раз. В задании один лишний заголовок.</p>
 <ol>
   <li>Places to stay in.</li>
@@ -920,5 +1177,7 @@ func defaultSourceHTML() string {
     <td></td>
     <td></td>
   </tr>
-</table>`
+</table>
+</body>
+</html>`
 }

@@ -44,7 +44,6 @@ export type ExtractionRun = {
 export type PipelineContent = {
   source_html?: string;
   parameters?: string;
-  variation_rules?: string;
   variant_html?: string;
   variants_html?: string[];
   selected_variant?: number;
