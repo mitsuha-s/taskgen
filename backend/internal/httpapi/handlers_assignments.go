@@ -8,11 +8,17 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"teacher-assistant/backend/internal/db"
+	"teacher-assistant/backend/internal/extraction"
 	"teacher-assistant/backend/internal/files"
 )
 
 type createAssignmentRequest struct {
 	Title string `json:"title"`
+}
+
+type startExtractionRequest struct {
+	UseDefaultSource bool   `json:"use_default_source"`
+	StepModel        string `json:"step_model"`
 }
 
 func (s *Server) createAssignment(w http.ResponseWriter, r *http.Request) {
@@ -153,10 +159,21 @@ func (s *Server) startExtraction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	run, err := s.extraction.Start(r.Context(), assignmentID)
+	var body startExtractionRequest
+	if r.Body != nil {
+		_ = json.NewDecoder(r.Body).Decode(&body)
+	}
+	run, err := s.extraction.Start(r.Context(), assignmentID, extraction.StartOptions{
+		UseDefaultSource: body.UseDefaultSource,
+		StepModel:        body.StepModel,
+	})
 	if err != nil {
 		if errors.Is(err, db.ErrNotFound) {
 			writeError(w, http.StatusNotFound, "image_not_found", "Assignment image was not found.")
+			return
+		}
+		if errors.Is(err, extraction.ErrInvalidFinalModel) {
+			writeError(w, http.StatusBadRequest, "invalid_step_model", "Step model must be lite or pro.")
 			return
 		}
 		s.logger.Error("failed to start extraction", "assignment_id", assignmentID, "error", err)

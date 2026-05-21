@@ -68,19 +68,18 @@ func (p *MockProvider) AnalyzeAssignmentImage(ctx context.Context, req AnalyzeAs
 }
 
 func (p *MockProvider) ConvertAssignmentImageToMarkdown(ctx context.Context, req ConvertAssignmentImageToMarkdownRequest) (*TextGenerationResponse, error) {
-	content := `# English Grammar Test
-
-Choose the correct answer.
-
-1. She ___ to school yesterday.
-   - go
-   - went
-   - goes
-
-2. They ___ football every Sunday.
-   - plays
-   - play
-   - played`
+	content := `<section>
+  <h1>English Grammar Test</h1>
+  <p>Choose the correct answer.</p>
+  <ol>
+    <li>She ___ to school yesterday.
+      <ul><li>go</li><li>went</li><li>goes</li></ul>
+    </li>
+    <li>They ___ football every Sunday.
+      <ul><li>plays</li><li>play</li><li>played</li></ul>
+    </li>
+  </ol>
+</section>`
 
 	return &TextGenerationResponse{
 		RawResponse: content,
@@ -95,20 +94,12 @@ func (p *MockProvider) GenerateAssignmentText(ctx context.Context, req GenerateA
 	if strings.Contains(req.Prompt, "Допустимый характер вариации") {
 		content = "синонимическая замена неключевых формулировок, изменение порядка перечисления"
 	}
-	if strings.Contains(req.Prompt, "создать ещё один новый вариант") && strings.Contains(req.Prompt, "Допустимые изменения") {
-		content = `# English Grammar Test
-
-Choose the correct answer.
-
-1. He ___ breakfast at seven yesterday.
-   - have
-   - had
-   - has
-
-2. We ___ English on Mondays.
-   - studies
-   - study
-   - studied`
+	if strings.Contains(req.Prompt, "создать") && strings.Contains(req.Prompt, "новых вариантов") {
+		content = `{"variants":[
+  "<section><h1>English Grammar Test</h1><p>Choose the correct answer.</p><ol><li>He ___ breakfast at seven yesterday.<ul><li>have</li><li>had</li><li>has</li></ul></li><li>We ___ English on Mondays.<ul><li>studies</li><li>study</li><li>studied</li></ul></li></ol></section>",
+  "<section><h1>English Grammar Test</h1><p>Choose the correct answer.</p><ol><li>My sister ___ TV last night.<ul><li>watch</li><li>watched</li><li>watches</li></ul></li><li>They ___ chess after class.<ul><li>plays</li><li>play</li><li>played</li></ul></li></ol></section>",
+  "<section><h1>English Grammar Test</h1><p>Choose the correct answer.</p><ol><li>Tom ___ to school by bus yesterday.<ul><li>go</li><li>went</li><li>goes</li></ul></li><li>We ___ English every Thursday.<ul><li>learns</li><li>learn</li><li>learned</li></ul></li></ol></section>"
+] }`
 	}
 
 	return &TextGenerationResponse{

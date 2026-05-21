@@ -32,7 +32,9 @@ type updateStepRequest struct {
 }
 
 type continueExtractionRequest struct {
-	FinalModel string `json:"final_model"`
+	FinalModel   string `json:"final_model"`
+	VariantCount int    `json:"variant_count"`
+	StepModel    string `json:"step_model"`
 }
 
 func (s *Server) updateExtractionStep(w http.ResponseWriter, r *http.Request) {
@@ -98,7 +100,9 @@ func (s *Server) continueExtractionRun(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewDecoder(r.Body).Decode(&body)
 	}
 	run, err := s.extraction.Continue(r.Context(), runID, extraction.ContinueOptions{
-		FinalModel: body.FinalModel,
+		FinalModel:   body.FinalModel,
+		VariantCount: body.VariantCount,
+		StepModel:    body.StepModel,
 	})
 	if err != nil {
 		if errors.Is(err, db.ErrNotFound) {
@@ -110,7 +114,11 @@ func (s *Server) continueExtractionRun(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if errors.Is(err, extraction.ErrInvalidFinalModel) {
-			writeError(w, http.StatusBadRequest, "invalid_final_model", "Final model must be lite or pro.")
+			writeError(w, http.StatusBadRequest, "invalid_final_model", "Model must be lite or pro.")
+			return
+		}
+		if errors.Is(err, extraction.ErrInvalidVariantCount) {
+			writeError(w, http.StatusBadRequest, "invalid_variant_count", "Variant count must be from 1 to 10.")
 			return
 		}
 		s.logger.Error("failed to continue extraction run", "run_id", runID, "error", err)

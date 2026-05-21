@@ -42,10 +42,12 @@ export type ExtractionRun = {
 };
 
 export type PipelineContent = {
-  markdown?: string;
+  source_html?: string;
   parameters?: string;
   variation_rules?: string;
-  variant_markdown?: string;
+  variant_html?: string;
+  variants_html?: string[];
+  selected_variant?: number;
   steps: PipelineStepResult[];
 };
 
@@ -132,21 +134,21 @@ export const api = {
       },
     );
   },
-  startExtraction: (assignmentId: string) =>
+  startExtraction: (assignmentId: string, options?: { use_default_source?: boolean; step_model?: 'lite' | 'pro' }) =>
     request<{ extraction_run_id: string; status: string }>(
       `/api/assignments/${assignmentId}/extract`,
-      { method: 'POST' },
+      { method: 'POST', body: JSON.stringify(options ?? {}) },
     ),
   getAssignment: (assignmentId: string) =>
     request<Assignment>(`/api/assignments/${assignmentId}`),
   getExtractionRun: (runId: string) =>
     request<ExtractionRun>(`/api/extraction-runs/${runId}`),
-  continueExtractionRun: (runId: string, finalModel?: 'lite' | 'pro') =>
+  continueExtractionRun: (runId: string, options?: { final_model?: 'lite' | 'pro'; variant_count?: number; step_model?: 'lite' | 'pro' }) =>
     request<{ extraction_run_id: string; status: string; next_step: number }>(
       `/api/extraction-runs/${runId}/continue`,
       {
         method: 'POST',
-        body: JSON.stringify(finalModel ? { final_model: finalModel } : {}),
+        body: JSON.stringify(options ?? {}),
       },
     ),
   updateExtractionStep: (runId: string, step: number, content: string) =>

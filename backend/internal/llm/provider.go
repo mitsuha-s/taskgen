@@ -22,6 +22,7 @@ type ConvertAssignmentImageToMarkdownRequest struct {
 	MimeType      string
 	Prompt        string
 	PromptVersion string
+	Model         string
 }
 
 type GenerateAssignmentTextRequest struct {

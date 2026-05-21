@@ -15,13 +15,17 @@ RUN CGO_ENABLED=0 GOOS=linux go build -o /out/api ./cmd/api
 
 FROM alpine:3.22
 WORKDIR /app
-RUN adduser -D -H app \
+RUN apk add --no-cache ca-certificates \
+    && adduser -D -H app \
     && mkdir -p /app/storage/uploads /app/frontend/dist /app/migrations \
     && chown -R app:app /app/storage
+COPY certs/russian-trusted-sub-ca.crt /usr/local/share/ca-certificates/russian-trusted-sub-ca.crt
+COPY certs/russian-trusted-root-ca.crt /usr/local/share/ca-certificates/russian-trusted-root-ca.crt
 COPY --from=backend-builder /out/api /app/api
 COPY --from=backend-builder /src/backend/migrations /app/migrations
 COPY --from=frontend-builder /src/frontend/dist /app/frontend/dist
-RUN chown -R app:app /app/api /app/frontend /app/migrations \
+RUN update-ca-certificates \
+    && chown -R app:app /app/api /app/frontend /app/migrations \
     && chmod -R u=rwX,go=rX /app/api /app/frontend /app/migrations
 ENV HTTP_ADDR=:8080 \
     FRONTEND_DIST_DIR=/app/frontend/dist \
