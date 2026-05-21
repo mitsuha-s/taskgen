@@ -4,7 +4,7 @@ import { useRef, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { api, PipelineStepResult, userMessage } from '../lib/api';
 
-const totalSteps = 4;
+const totalSteps = 5;
 
 export default function ReviewPage() {
   const { id } = useParams<{ id: string }>();
@@ -273,6 +273,16 @@ function PipelineResults({
 
 function StepContentView({ step }: { step: PipelineStepResult }) {
   const isHTMLStep = step.key === 'source_html' || step.key === 'variant_html';
+  if (step.key === 'self_score') {
+    return (
+      <div className="bg-white px-5 py-4">
+        <div className="inline-flex items-baseline gap-2 rounded-lg bg-[linear-gradient(135deg,#e7e5ff,#dff7ff)] px-4 py-3 text-leaf">
+          <span className="text-3xl font-bold leading-none">{step.content}</span>
+          <span className="text-sm font-semibold">/ 10</span>
+        </div>
+      </div>
+    );
+  }
   if (isHTMLStep) {
     return (
       <div className="max-h-[500px] overflow-auto bg-white px-5 py-4 text-sm">

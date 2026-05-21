@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -14,7 +16,11 @@ import (
 	"teacher-assistant/backend/internal/llm"
 )
 
-const totalPipelineSteps = 4
+const totalPipelineSteps = 5
+const generationStep = 4
+const evaluationStep = 5
+
+var scorePattern = regexp.MustCompile(`\b(10|[1-9])\b`)
 
 var ErrPipelineNotReady = errors.New("pipeline is not waiting for confirmation")
 var ErrInvalidPipelineStep = errors.New("invalid pipeline step")
@@ -54,6 +60,7 @@ type pipelineContent struct {
 	VariantHTML     string               `json:"variant_html,omitempty"`
 	VariantsHTML    []string             `json:"variants_html,omitempty"`
 	SelectedVariant int                  `json:"selected_variant,omitempty"`
+	SelfScore       string               `json:"self_score,omitempty"`
 	UsedDefaultHTML bool                 `json:"used_default_html,omitempty"`
 	Steps           []pipelineStepResult `json:"steps"`
 }
@@ -164,11 +171,24 @@ func (s *Service) UpdateStep(ctx context.Context, runID string, step int, conten
 		Content:   content,
 		CreatedAt: time.Now().UTC().Format(time.RFC3339),
 	})
+	if step == generationStep && run.Status == "succeeded" {
+		if score := resultContent(parsePipelineResults(run.StepResults), "self_score"); score != "" {
+			results = append(results, pipelineStepResult{
+				Step:      evaluationStep,
+				Key:       pipelineStepKey(evaluationStep),
+				Title:     pipelineStepTitle(evaluationStep),
+				Content:   score,
+				CreatedAt: time.Now().UTC().Format(time.RFC3339),
+			})
+		}
+	}
 	status := "awaiting_confirmation"
 	assignmentStatus := "processing_waiting"
-	if step == totalPipelineSteps {
+	currentStep := step
+	if step == totalPipelineSteps || (step == generationStep && run.Status == "succeeded") {
 		status = "succeeded"
 		assignmentStatus = "processed"
+		currentStep = totalPipelineSteps
 	}
 	parsedContent, err := json.Marshal(buildPipelineContent(results))
 	if err != nil {
@@ -178,10 +198,10 @@ func (s *Service) UpdateStep(ctx context.Context, runID string, step int, conten
 	if err != nil {
 		return db.ExtractionRun{}, err
 	}
-	if err := s.store.UpdateExtractionStepResults(ctx, runID, status, assignmentStatus, step, stepResults, parsedContent); err != nil {
+	if err := s.store.UpdateExtractionStepResults(ctx, runID, status, assignmentStatus, currentStep, stepResults, parsedContent); err != nil {
 		return db.ExtractionRun{}, err
 	}
-	if step == 4 {
+	if step == generationStep {
 		updatedRun, err := s.store.GetExtractionRun(ctx, runID)
 		if err == nil {
 			var parsed pipelineContent
@@ -195,7 +215,7 @@ func (s *Service) UpdateStep(ctx context.Context, runID string, step int, conten
 					}
 				}
 				if patched, marshalErr := json.Marshal(parsed); marshalErr == nil {
-					_ = s.store.UpdateExtractionStepResults(ctx, runID, status, assignmentStatus, step, stepResults, patched)
+					_ = s.store.UpdateExtractionStepResults(ctx, runID, status, assignmentStatus, currentStep, stepResults, patched)
 				}
 			}
 		}
@@ -240,6 +260,11 @@ func (s *Service) executeStep(runID string, step int, finalModel string, variant
 		return
 	}
 
+	var evaluationResult *pipelineStepResult
+	if step == generationStep {
+		resp, result, variants, input, evaluationResult = s.evaluateAndMaybeRetry(ctx, run, results, resp, result, variants, input, finalModel, variantCount, stepModel)
+	}
+
 	results = append(results, result)
 	content := buildPipelineContent(results)
 	if useDefaultSource && step == 1 {
@@ -248,10 +273,15 @@ func (s *Service) executeStep(runID string, step int, finalModel string, variant
 	if parsedExisting := parsePipelineContent(run.ParsedContent); parsedExisting.UsedDefaultHTML {
 		content.UsedDefaultHTML = true
 	}
-	if step == 4 && len(variants) > 0 {
+	if step == generationStep && len(variants) > 0 {
 		content.VariantsHTML = variants
 		content.SelectedVariant = 1
 		content.VariantHTML = variants[0]
+	}
+	if evaluationResult != nil {
+		results = append(results, *evaluationResult)
+		content.SelfScore = evaluationResult.Content
+		content.Steps = results
 	}
 	parsedContent, err := json.Marshal(content)
 	if err != nil {
@@ -280,7 +310,7 @@ func (s *Service) executeStep(runID string, step int, finalModel string, variant
 
 	status := "awaiting_confirmation"
 	assignmentStatus := "processing_waiting"
-	if step == totalPipelineSteps {
+	if step == totalPipelineSteps || step == generationStep {
 		status = "succeeded"
 		assignmentStatus = "processed"
 	}
@@ -292,7 +322,7 @@ func (s *Service) executeStep(runID string, step int, finalModel string, variant
 		Model:            resp.Model,
 		PromptVersion:    PromptVersion,
 		RawResponse:      resp.RawResponse,
-		CurrentStep:      step,
+		CurrentStep:      finishedPipelineStep(step),
 		StepResults:      stepResults,
 		ParsedContent:    parsedContent,
 		Warnings:         json.RawMessage("[]"),
@@ -391,6 +421,19 @@ func (s *Service) runStep(ctx context.Context, run db.ExtractionRun, step int, r
 			PromptVersion: PromptVersion,
 			Model:         model,
 		})
+	case 5:
+		sourceHTML := resultContent(results, "source_html")
+		variantHTML := resultContent(results, "variant_html")
+		if sourceHTML == "" || variantHTML == "" {
+			return nil, pipelineStepResult{}, nil, mustJSON(input), errors.New("previous pipeline results are missing")
+		}
+		prompt := selfEvaluationPrompt(sourceHTML, variantHTML)
+		input["prompt"] = prompt
+		resp, err = s.provider.GenerateAssignmentText(ctx, llm.GenerateAssignmentTextRequest{
+			Prompt:        prompt,
+			PromptVersion: PromptVersion,
+			Model:         stepModel,
+		})
 	default:
 		return nil, pipelineStepResult{}, nil, mustJSON(input), fmt.Errorf("unsupported pipeline step %d", step)
 	}
@@ -407,6 +450,9 @@ func (s *Service) runStep(ctx context.Context, run db.ExtractionRun, step int, r
 		}
 		content = variants[0]
 	}
+	if step == 5 {
+		content = strconv.Itoa(extractScore(content))
+	}
 	result := pipelineStepResult{
 		Step:      step,
 		Key:       pipelineStepKey(step),
@@ -415,6 +461,98 @@ func (s *Service) runStep(ctx context.Context, run db.ExtractionRun, step int, r
 		CreatedAt: time.Now().UTC().Format(time.RFC3339),
 	}
 	return resp, result, variants, mustJSON(input), nil
+}
+
+func (s *Service) evaluateAndMaybeRetry(
+	ctx context.Context,
+	run db.ExtractionRun,
+	previousResults []pipelineStepResult,
+	resp *llm.TextGenerationResponse,
+	result pipelineStepResult,
+	variants []string,
+	input json.RawMessage,
+	finalModel string,
+	variantCount int,
+	stepModel string,
+) (*llm.TextGenerationResponse, pipelineStepResult, []string, json.RawMessage, *pipelineStepResult) {
+	sourceHTML := resultContent(previousResults, "source_html")
+	evaluationModel := finalModel
+	if evaluationModel == "" {
+		evaluationModel = stepModel
+	}
+
+	evalResp, evalResult, score, evalInput, err := s.evaluateVariant(ctx, run, sourceHTML, result.Content, evaluationModel)
+	if err != nil {
+		s.logger.Warn("failed to evaluate generated variant", "run_id", run.ID, "error", err)
+		return resp, result, variants, input, nil
+	}
+	s.insertEvaluationRun(ctx, run.ID, evalResp, evalResult, evalInput)
+
+	if score > 6 {
+		return resp, result, variants, input, &evalResult
+	}
+
+	retryResp, retryResult, retryVariants, retryInput, retryErr := s.runStep(ctx, run, generationStep, previousResults, finalModel, variantCount, false, stepModel)
+	if retryErr != nil {
+		s.logger.Warn("failed to regenerate low-scored variant", "run_id", run.ID, "score", score, "error", retryErr)
+		return resp, result, variants, input, &evalResult
+	}
+
+	retryEvalResp, retryEvalResult, _, retryEvalInput, retryEvalErr := s.evaluateVariant(ctx, run, sourceHTML, retryResult.Content, evaluationModel)
+	if retryEvalErr != nil {
+		s.logger.Warn("failed to evaluate regenerated variant", "run_id", run.ID, "error", retryEvalErr)
+		return retryResp, retryResult, retryVariants, retryInput, nil
+	}
+	s.insertEvaluationRun(ctx, run.ID, retryEvalResp, retryEvalResult, retryEvalInput)
+	return retryResp, retryResult, retryVariants, retryInput, &retryEvalResult
+}
+
+func (s *Service) evaluateVariant(ctx context.Context, run db.ExtractionRun, sourceHTML, variantHTML, model string) (*llm.TextGenerationResponse, pipelineStepResult, int, json.RawMessage, error) {
+	prompt := selfEvaluationPrompt(sourceHTML, variantHTML)
+	input := map[string]any{
+		"assignment_id":  run.AssignmentID,
+		"run_id":         run.ID,
+		"step":           evaluationStep,
+		"prompt_version": PromptVersion,
+		"prompt":         prompt,
+	}
+	resp, err := s.provider.GenerateAssignmentText(ctx, llm.GenerateAssignmentTextRequest{
+		Prompt:        prompt,
+		PromptVersion: PromptVersion,
+		Model:         model,
+	})
+	if err != nil {
+		return resp, pipelineStepResult{}, 0, mustJSON(input), err
+	}
+
+	score := extractScore(resp.Content)
+	result := pipelineStepResult{
+		Step:      evaluationStep,
+		Key:       pipelineStepKey(evaluationStep),
+		Title:     pipelineStepTitle(evaluationStep),
+		Content:   strconv.Itoa(score),
+		CreatedAt: time.Now().UTC().Format(time.RFC3339),
+	}
+	return resp, result, score, mustJSON(input), nil
+}
+
+func (s *Service) insertEvaluationRun(ctx context.Context, runID string, resp *llm.TextGenerationResponse, result pipelineStepResult, input json.RawMessage) {
+	if resp == nil {
+		return
+	}
+	resultJSON, _ := json.Marshal(result)
+	if err := s.store.InsertLLMRun(ctx, db.LLMRunInput{
+		TaskType:      pipelineTaskType(evaluationStep),
+		Provider:      resp.Provider,
+		Model:         resp.Model,
+		PromptVersion: PromptVersion,
+		Input:         input,
+		RawOutput:     resp.RawResponse,
+		ParsedOutput:  resultJSON,
+		Status:        "succeeded",
+	}); err != nil {
+		s.logger.Error("failed to insert evaluation llm run", "run_id", runID, "error", err)
+	}
 }
 
 func (s *Service) fail(ctx context.Context, runID, provider, model, rawResponse, message string) {
@@ -447,11 +585,12 @@ func parsePipelineContent(raw json.RawMessage) pipelineContent {
 
 func buildPipelineContent(results []pipelineStepResult) pipelineContent {
 	return pipelineContent{
-		SourceHTML:      resultContent(results, "source_html"),
-		Parameters:      resultContent(results, "parameters"),
-		VariationRules:  resultContent(results, "variation_rules"),
-		VariantHTML:     resultContent(results, "variant_html"),
-		Steps:           results,
+		SourceHTML:     resultContent(results, "source_html"),
+		Parameters:     resultContent(results, "parameters"),
+		VariationRules: resultContent(results, "variation_rules"),
+		VariantHTML:    resultContent(results, "variant_html"),
+		SelfScore:      resultContent(results, "self_score"),
+		Steps:          results,
 	}
 }
 
@@ -536,6 +675,32 @@ func parseHTMLVariants(content string) []string {
 	return nil
 }
 
+func extractScore(content string) int {
+	content = normalizeLLMText(content)
+	var parsed struct {
+		Score int `json:"score"`
+	}
+	if err := json.Unmarshal([]byte(content), &parsed); err == nil && parsed.Score >= 1 && parsed.Score <= 10 {
+		return parsed.Score
+	}
+	match := scorePattern.FindString(content)
+	if match == "" {
+		return 1
+	}
+	score, err := strconv.Atoi(match)
+	if err != nil || score < 1 || score > 10 {
+		return 1
+	}
+	return score
+}
+
+func finishedPipelineStep(step int) int {
+	if step == generationStep {
+		return evaluationStep
+	}
+	return step
+}
+
 func pipelineStepKey(step int) string {
 	switch step {
 	case 1:
@@ -546,6 +711,8 @@ func pipelineStepKey(step int) string {
 		return "variation_rules"
 	case 4:
 		return "variant_html"
+	case 5:
+		return "self_score"
 	default:
 		return "unknown"
 	}
@@ -561,6 +728,8 @@ func pipelineStepTitle(step int) string {
 		return "Допустимые изменения"
 	case 4:
 		return "Новый вариант задания (HTML)"
+	case 5:
+		return "Самооценка результата"
 	default:
 		return "Шаг пайплайна"
 	}
@@ -658,7 +827,7 @@ func variantsPrompt(sourceHTML, parameters, variationRules string, variantCount 
 	return fmt.Sprintf(`Я отправляю тебе задание в виде HTML файла. Необходимо на его основе создать %d новых вариантов такого же задания. Было определено, что это задание имеет следующие параметры:
 
 <результат step2>
-` + parameters + `
+`+parameters+`
 </результат step2>
 
 Определи части задания, которые можно изменять, а какие нельзя, например формулировка задания, нумерация, индексы букв и пр., чтобы избежать нарушения логики.
@@ -667,7 +836,7 @@ func variantsPrompt(sourceHTML, parameters, variationRules string, variantCount 
 -
 
 Допустимые изменения в задании для создания новых вариантов:
-` + variationRules + `
+`+variationRules+`
 
 Верни JSON строго в одном из форматов:
 1) {"variants": ["<section>...</section>", "..."]}
@@ -683,6 +852,31 @@ func variantsPrompt(sourceHTML, parameters, variationRules string, variantCount 
 <результат step1_html>
 `+sourceHTML+`
 </результат step1_html>`, variantCount, variantCount)
+}
+
+func selfEvaluationPrompt(sourceHTML, variantHTML string) string {
+	return `Я прикрепил два файла. Первый файл - эталонный учебный вариант. Второй файл - сгенерированный новый вариант.
+
+Проверь, насколько второй вариант соответствует первому по структуре, уровню сложности, типам заданий, объему, формулировкам и учебной логике.
+
+Оцени по шкале от 1 до 10:
+1. Что сохранено хорошо.
+2. Где есть отличия или ошибки.
+3. Можно ли использовать второй вариант для ученика.
+4. Что нужно исправить, чтобы он стал ближе к эталону.
+
+Не требуй полного совпадения чисел и условий, если смысл, сложность и формат заданий сохранены. В ответе укажи итоговую оценку 1-10. Больше ничего не пиши. Пример ответа:
+4
+
+Верни только одно число от 1 до 10.
+
+<эталонный_вариант>
+` + sourceHTML + `
+</эталонный_вариант>
+
+<сгенерированный_вариант>
+` + variantHTML + `
+</сгенерированный_вариант>`
 }
 
 func defaultSourceHTML() string {

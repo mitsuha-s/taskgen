@@ -48,6 +48,7 @@ export type PipelineContent = {
   variant_html?: string;
   variants_html?: string[];
   selected_variant?: number;
+  self_score?: string;
   steps: PipelineStepResult[];
 };
 

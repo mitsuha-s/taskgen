@@ -101,6 +101,9 @@ func (p *MockProvider) GenerateAssignmentText(ctx context.Context, req GenerateA
   "<section><h1>English Grammar Test</h1><p>Choose the correct answer.</p><ol><li>Tom ___ to school by bus yesterday.<ul><li>go</li><li>went</li><li>goes</li></ul></li><li>We ___ English every Thursday.<ul><li>learns</li><li>learn</li><li>learned</li></ul></li></ol></section>"
 ] }`
 	}
+	if strings.Contains(req.Prompt, "итоговую оценку") && strings.Contains(req.Prompt, "эталонный учебный вариант") {
+		content = "8"
+	}
 
 	return &TextGenerationResponse{
 		RawResponse: content,
