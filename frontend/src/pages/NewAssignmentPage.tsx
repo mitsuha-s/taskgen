@@ -1,6 +1,6 @@
 import { zodResolver } from '@hookform/resolvers/zod';
 import { useMutation } from '@tanstack/react-query';
-import { ImagePlus, Loader2, UploadCloud } from 'lucide-react';
+import { Cpu, FileImage, Gauge, ImagePlus, Loader2, ScanLine, UploadCloud } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { useForm, useWatch } from 'react-hook-form';
 import { useNavigate } from 'react-router-dom';
@@ -79,14 +79,31 @@ export default function NewAssignmentPage() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-semibold text-ink">Новое эталонное задание</h1>
-        <p className="mt-1 text-sm text-slate-600">Загрузите одно изображение задания для распознавания.</p>
-      </div>
+      <section className="surface-dark machine-grid overflow-hidden p-5 sm:p-6">
+        <div className="flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between">
+          <div className="max-w-2xl">
+            <span className="status-chip border-cyan-300/30 bg-white/[0.08] text-cyan-100">
+              <Cpu className="h-3.5 w-3.5" aria-hidden="true" />
+              AI-ввод
+            </span>
+            <h1 className="mt-4 text-2xl font-semibold leading-tight text-white sm:text-3xl">Новое эталонное задание</h1>
+            <p className="mt-2 text-sm leading-6 text-slate-300">Загрузите изображение, чтобы запустить распознавание и сборку нового варианта.</p>
+          </div>
+          <div className="grid gap-2 sm:grid-cols-3 lg:min-w-[460px]">
+            <HeaderMetric icon={FileImage} label="Форматы" value="PNG JPG WEBP" />
+            <HeaderMetric icon={Gauge} label="Лимит" value="10 MB" />
+            <HeaderMetric icon={ScanLine} label="Режим" value="Vision AI" />
+          </div>
+        </div>
+      </section>
 
       <form className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(360px,420px)]" onSubmit={form.handleSubmit(onSubmit)}>
-        <section className="panel p-5">
-          <div className="space-y-5">
+        <section className="panel overflow-hidden">
+          <div className="panel-heading flex items-center gap-2">
+            <UploadCloud className="h-4 w-4 text-ai" aria-hidden="true" />
+            Входные данные
+          </div>
+          <div className="space-y-5 p-5">
             <div className="space-y-1.5">
               <label className="label" htmlFor="title">
                 Название
@@ -107,12 +124,14 @@ export default function NewAssignmentPage() {
                 Изображение задания
               </label>
               <label
-                className="flex min-h-40 cursor-pointer flex-col items-center justify-center gap-3 rounded-lg border border-dashed border-slate-300 bg-slate-50 px-4 py-8 text-center transition hover:border-cyan-700 hover:bg-cyan-50/40"
+                className="scan-frame flex min-h-48 cursor-pointer flex-col items-center justify-center gap-3 border-dashed px-4 py-8 text-center transition hover:border-ai hover:bg-cyan-50/60"
                 htmlFor="file"
               >
-                <ImagePlus className="h-8 w-8 text-cyan-700" aria-hidden="true" />
-                <span className="text-sm font-medium text-slate-800">{selectedFileLabel}</span>
-                <span className="text-xs text-slate-500">PNG, JPG, WEBP до 10 MB</span>
+                <span className="relative z-10 flex h-12 w-12 items-center justify-center rounded-md border border-cyan-200 bg-white text-ai shadow-sm">
+                  <ImagePlus className="h-6 w-6" aria-hidden="true" />
+                </span>
+                <span className="relative z-10 text-sm font-semibold text-slate-900">{selectedFileLabel}</span>
+                <span className="relative z-10 text-xs font-medium uppercase text-slate-500">PNG, JPG, WEBP до 10 MB</span>
               </label>
               <input
                 id="file"
@@ -140,20 +159,39 @@ export default function NewAssignmentPage() {
         </section>
 
         <aside className="panel overflow-hidden">
-          <div className="border-b border-slate-200 px-4 py-3 text-sm font-medium text-slate-800">Предпросмотр</div>
-          <div className="flex min-h-80 items-center justify-center bg-slate-100 p-4">
+          <div className="panel-heading flex items-center justify-between gap-3">
+            <span>Предпросмотр</span>
+            <span className="rounded border border-slate-300 bg-white px-2 py-0.5 text-[11px] font-semibold uppercase text-slate-500">
+              Эталон
+            </span>
+          </div>
+          <div className="scan-frame flex min-h-96 items-center justify-center rounded-none border-0 bg-slate-100 p-4">
             {previewURL ? (
               <img
-                className="max-h-[560px] w-full rounded-md object-contain"
+                className="relative z-10 max-h-[560px] w-full rounded-md border border-slate-200 bg-white object-contain shadow-sm"
                 src={previewURL}
                 alt="Предпросмотр выбранного задания"
               />
             ) : (
-              <div className="text-center text-sm text-slate-500">Изображение появится после выбора файла.</div>
+              <div className="relative z-10 rounded-md border border-slate-200 bg-white/80 px-4 py-3 text-center text-sm text-slate-500 shadow-sm">
+                Изображение появится после выбора файла.
+              </div>
             )}
           </div>
         </aside>
       </form>
+    </div>
+  );
+}
+
+function HeaderMetric({ icon: Icon, label, value }: { icon: typeof Cpu; label: string; value: string }) {
+  return (
+    <div className="rounded-md border border-white/10 bg-white/[0.08] p-3">
+      <div className="flex items-center gap-2 text-xs font-semibold uppercase text-slate-400">
+        <Icon className="h-3.5 w-3.5 text-cyan-200" aria-hidden="true" />
+        {label}
+      </div>
+      <div className="mt-2 text-sm font-semibold text-white">{value}</div>
     </div>
   );
 }

@@ -11,7 +11,11 @@ function RequireAuth({ children }: { children: ReactNode }) {
   const me = useMe();
 
   if (me.isLoading) {
-    return <div className="min-h-screen bg-paper p-6 text-sm text-slate-600">Проверяем сессию...</div>;
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-paper p-6 text-sm text-slate-600">
+        <div className="panel px-5 py-4 font-medium">Проверяем сессию...</div>
+      </div>
+    );
   }
 
   if (me.isError && isUnauthorized(me.error)) {
