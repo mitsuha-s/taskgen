@@ -1,7 +1,5 @@
 package extraction
 
-const PromptVersion = "task_processing_pipeline_v1"
-
 var allowedSectionTypes = map[string]struct{}{
 	"instruction":     {},
 	"reading_text":    {},

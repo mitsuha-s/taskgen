@@ -140,6 +140,37 @@ docker compose build
 
 Эти команды собирают frontend и Go backend на сервере и могут снова подвесить VPS.
 
+## Как менять промпты
+
+Тексты промптов лежат в:
+
+```text
+prompts/task_processing_pipeline_v1/
+```
+
+Backend читает активный набор из `PROMPTS_DIR`. В Docker image значение по умолчанию:
+
+```text
+/app/prompts/task_processing_pipeline_v1
+```
+
+Если меняется только текст промпта и код не меняется, можно не пересобирать image. Синхронизируйте prompt set на сервер:
+
+```bash
+rsync -az --delete \
+  prompts/task_processing_pipeline_v1/ \
+  "$SERVER:$REMOTE_DIR/prompts/task_processing_pipeline_v1/"
+```
+
+И перезапустите backend без build:
+
+```bash
+ssh -o BatchMode=yes -o ConnectTimeout=15 "$SERVER" \
+  "docker compose --project-directory $REMOTE_DIR -f $REMOTE_DIR/docker-compose.yml restart backend"
+```
+
+Новый `extraction_run` будет использовать версию из `manifest.json`. Текущий запущенный run лучше не менять на середине обработки: дождитесь завершения или запустите новый run после restart.
+
 ## Если изменился docker-compose.yml
 
 Если менялись только frontend/backend исходники, достаточно передать новый image. Если менялся `docker-compose.yml`, `.env.example`, `Dockerfile`, certs или другие файлы, которые должны лежать в `/opt/teacher-assistant`, синхронизируйте проект отдельно, не перезаписывая серверный `.env`:

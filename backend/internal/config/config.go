@@ -28,6 +28,7 @@ type Config struct {
 	GigaChatTimeout   int64
 	FrontendDistDir   string
 	MigrationsDir     string
+	PromptsDir        string
 	CORSAllowedOrigin string
 	MaxUploadBytes    int64
 }
@@ -56,6 +57,7 @@ func Load() Config {
 		GigaChatTimeout:   envInt64("GIGACHAT_TIMEOUT", 90),
 		FrontendDistDir:   env("FRONTEND_DIST_DIR", "../frontend/dist"),
 		MigrationsDir:     env("MIGRATIONS_DIR", "migrations"),
+		PromptsDir:        env("PROMPTS_DIR", "../prompts/task_processing_pipeline_v1"),
 		CORSAllowedOrigin: env("CORS_ALLOWED_ORIGIN", "http://localhost:5173"),
 		MaxUploadBytes:    envInt64("MAX_UPLOAD_BYTES", 10*1024*1024),
 	}

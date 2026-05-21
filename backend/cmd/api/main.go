@@ -54,7 +54,14 @@ func main() {
 		GigaChatVerifyTLS: cfg.GigaChatVerifyTLS,
 		GigaChatTimeout:   cfg.GigaChatTimeout,
 	})
-	extractionService := extraction.NewService(store, storage, visionProvider, logger)
+	promptSet, err := extraction.LoadPromptSet(cfg.PromptsDir)
+	if err != nil {
+		logger.Error("failed to load prompts", "dir", cfg.PromptsDir, "error", err)
+		os.Exit(1)
+	}
+	logger.Info("loaded prompts", "version", promptSet.Version, "dir", promptSet.Dir)
+
+	extractionService := extraction.NewService(store, storage, visionProvider, promptSet, logger)
 	router := httpapi.NewRouter(cfg, store, authService, storage, extractionService, logger)
 
 	server := &http.Server{

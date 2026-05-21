@@ -29,6 +29,7 @@ services:
       PUBLIC_FILE_BASE_URL: /api/files
       FRONTEND_DIST_DIR: /app/frontend/dist
       MIGRATIONS_DIR: /app/migrations
+      PROMPTS_DIR: /app/prompts/task_processing_pipeline_v1
       CORS_ALLOWED_ORIGIN: http://localhost:5173
       LLM_PROVIDER: ${LLM_PROVIDER:-mock}
       GIGACHAT_AUTH_KEY: ${GIGACHAT_AUTH_KEY:-}
@@ -48,6 +49,7 @@ services:
       - "${APP_PORT:-18080}:8080"
     volumes:
       - backend_uploads:/app/storage/uploads
+      - ./prompts/task_processing_pipeline_v1:/app/prompts/task_processing_pipeline_v1:ro
     depends_on:
       postgres:
         condition: service_healthy

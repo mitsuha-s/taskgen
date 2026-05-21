@@ -31,6 +31,7 @@ type Service struct {
 	store    *db.Store
 	storage  *files.LocalStorage
 	provider llm.VisionProvider
+	prompts  *PromptSet
 	logger   *slog.Logger
 }
 
@@ -85,8 +86,8 @@ type taskSection struct {
 	End     int
 }
 
-func NewService(store *db.Store, storage *files.LocalStorage, provider llm.VisionProvider, logger *slog.Logger) *Service {
-	return &Service{store: store, storage: storage, provider: provider, logger: logger}
+func NewService(store *db.Store, storage *files.LocalStorage, provider llm.VisionProvider, prompts *PromptSet, logger *slog.Logger) *Service {
+	return &Service{store: store, storage: storage, provider: provider, prompts: prompts, logger: logger}
 }
 
 func (s *Service) Start(ctx context.Context, assignmentID string, options StartOptions) (db.ExtractionRun, error) {
@@ -96,7 +97,7 @@ func (s *Service) Start(ctx context.Context, assignmentID string, options StartO
 		}
 	}
 
-	run, err := s.store.CreateExtractionRun(ctx, assignmentID, PromptVersion)
+	run, err := s.store.CreateExtractionRun(ctx, assignmentID, s.prompts.Version)
 	if err != nil {
 		return db.ExtractionRun{}, err
 	}
@@ -270,7 +271,7 @@ func (s *Service) executeStep(runID string, step int, finalModel string, variant
 			TaskType:      pipelineTaskType(step),
 			Provider:      provider,
 			Model:         model,
-			PromptVersion: PromptVersion,
+			PromptVersion: s.prompts.Version,
 			Input:         input,
 			RawOutput:     rawResponse,
 			Status:        "failed",
@@ -319,7 +320,7 @@ func (s *Service) executeStep(runID string, step int, finalModel string, variant
 		TaskType:      pipelineTaskType(step),
 		Provider:      resp.Provider,
 		Model:         resp.Model,
-		PromptVersion: PromptVersion,
+		PromptVersion: s.prompts.Version,
 		Input:         input,
 		RawOutput:     resp.RawResponse,
 		ParsedOutput:  resultJSON,
@@ -340,7 +341,7 @@ func (s *Service) executeStep(runID string, step int, finalModel string, variant
 		AssignmentStatus: assignmentStatus,
 		Provider:         resp.Provider,
 		Model:            resp.Model,
-		PromptVersion:    PromptVersion,
+		PromptVersion:    s.prompts.Version,
 		RawResponse:      resp.RawResponse,
 		CurrentStep:      finishedPipelineStep(step),
 		StepResults:      stepResults,
@@ -361,23 +362,24 @@ func (s *Service) runStep(ctx context.Context, run db.ExtractionRun, step int, r
 		"assignment_id":  run.AssignmentID,
 		"run_id":         run.ID,
 		"step":           step,
-		"prompt_version": PromptVersion,
+		"prompt_version": s.prompts.Version,
 	}
 
 	switch step {
 	case 1:
 		if useDefaultSource {
+			defaultHTML := s.prompts.DefaultSourceHTML()
 			result := pipelineStepResult{
 				Step:      step,
 				Key:       pipelineStepKey(step),
 				Title:     pipelineStepTitle(step),
-				Content:   defaultSourceHTML(),
+				Content:   defaultHTML,
 				CreatedAt: time.Now().UTC().Format(time.RFC3339),
 			}
 			input["use_default_source"] = true
 			return &llm.TextGenerationResponse{
-				RawResponse: defaultSourceHTML(),
-				Content:     defaultSourceHTML(),
+				RawResponse: defaultHTML,
+				Content:     defaultHTML,
 				Provider:    "local",
 				Model:       "default-html",
 			}, result, nil, mustJSON(input), nil
@@ -386,7 +388,10 @@ func (s *Service) runStep(ctx context.Context, run db.ExtractionRun, step int, r
 		if err != nil {
 			return nil, pipelineStepResult{}, nil, mustJSON(input), err
 		}
-		prompt := htmlFromImagePrompt()
+		prompt, err := s.prompts.HTMLFromImagePrompt()
+		if err != nil {
+			return nil, pipelineStepResult{}, nil, mustJSON(input), err
+		}
 		input["image_path"] = image.StoredPath
 		input["mime_type"] = image.MimeType
 		input["prompt"] = prompt
@@ -394,7 +399,7 @@ func (s *Service) runStep(ctx context.Context, run db.ExtractionRun, step int, r
 			ImagePath:     s.storage.FullPath(image.StoredPath),
 			MimeType:      image.MimeType,
 			Prompt:        prompt,
-			PromptVersion: PromptVersion,
+			PromptVersion: s.prompts.Version,
 			Model:         stepModel,
 		})
 	case 2:
@@ -409,10 +414,13 @@ func (s *Service) runStep(ctx context.Context, run db.ExtractionRun, step int, r
 		tasks := make([]taskParameters, 0, len(sections))
 		rawOutputs := make([]map[string]any, 0, len(sections))
 		for _, section := range sections {
-			prompt := parametersPrompt(section.HTML)
+			prompt, promptErr := s.prompts.ParametersPrompt(section.HTML)
+			if promptErr != nil {
+				return nil, pipelineStepResult{}, nil, mustJSON(input), promptErr
+			}
 			taskResp, taskErr := s.provider.GenerateAssignmentText(ctx, llm.GenerateAssignmentTextRequest{
 				Prompt:        prompt,
-				PromptVersion: PromptVersion,
+				PromptVersion: s.prompts.Version,
 				Model:         stepModel,
 			})
 			if taskErr != nil {
@@ -479,10 +487,13 @@ func (s *Service) runStep(ctx context.Context, run db.ExtractionRun, step int, r
 			taskOutputs := make([]map[string]any, 0, len(sections))
 			for sectionIndex, section := range sections {
 				params := bundle.Tasks[sectionIndex]
-				prompt := generationPrompt(section.HTML, params, bundle.UserComment)
+				prompt, promptErr := s.prompts.GenerationPrompt(section.HTML, params, bundle.UserComment)
+				if promptErr != nil {
+					return nil, pipelineStepResult{}, nil, mustJSON(input), promptErr
+				}
 				taskResp, taskErr := s.provider.GenerateAssignmentText(ctx, llm.GenerateAssignmentTextRequest{
 					Prompt:        prompt,
-					PromptVersion: PromptVersion,
+					PromptVersion: s.prompts.Version,
 					Model:         model,
 				})
 				if taskErr != nil {
@@ -531,11 +542,14 @@ func (s *Service) runStep(ctx context.Context, run db.ExtractionRun, step int, r
 		if sourceHTML == "" || variantHTML == "" {
 			return nil, pipelineStepResult{}, nil, mustJSON(input), errors.New("previous pipeline results are missing")
 		}
-		prompt := selfEvaluationPrompt(sourceHTML, variantHTML)
+		prompt, err := s.prompts.SelfEvaluationPrompt(sourceHTML, variantHTML)
+		if err != nil {
+			return nil, pipelineStepResult{}, nil, mustJSON(input), err
+		}
 		input["prompt"] = prompt
 		resp, err = s.provider.GenerateAssignmentText(ctx, llm.GenerateAssignmentTextRequest{
 			Prompt:        prompt,
-			PromptVersion: PromptVersion,
+			PromptVersion: s.prompts.Version,
 			Model:         stepModel,
 		})
 	default:
@@ -605,17 +619,24 @@ func (s *Service) evaluateAndMaybeRetry(
 }
 
 func (s *Service) evaluateVariant(ctx context.Context, run db.ExtractionRun, sourceHTML, variantHTML, model string) (*llm.TextGenerationResponse, pipelineStepResult, int, json.RawMessage, error) {
-	prompt := selfEvaluationPrompt(sourceHTML, variantHTML)
+	prompt, err := s.prompts.SelfEvaluationPrompt(sourceHTML, variantHTML)
+	if err != nil {
+		return nil, pipelineStepResult{}, 0, mustJSON(map[string]any{
+			"assignment_id": run.AssignmentID,
+			"run_id":        run.ID,
+			"step":          evaluationStep,
+		}), err
+	}
 	input := map[string]any{
 		"assignment_id":  run.AssignmentID,
 		"run_id":         run.ID,
 		"step":           evaluationStep,
-		"prompt_version": PromptVersion,
+		"prompt_version": s.prompts.Version,
 		"prompt":         prompt,
 	}
 	resp, err := s.provider.GenerateAssignmentText(ctx, llm.GenerateAssignmentTextRequest{
 		Prompt:        prompt,
-		PromptVersion: PromptVersion,
+		PromptVersion: s.prompts.Version,
 		Model:         model,
 	})
 	if err != nil {
@@ -642,7 +663,7 @@ func (s *Service) insertEvaluationRun(ctx context.Context, runID string, resp *l
 		TaskType:      pipelineTaskType(evaluationStep),
 		Provider:      resp.Provider,
 		Model:         resp.Model,
-		PromptVersion: PromptVersion,
+		PromptVersion: s.prompts.Version,
 		Input:         input,
 		RawOutput:     resp.RawResponse,
 		ParsedOutput:  resultJSON,
@@ -653,7 +674,7 @@ func (s *Service) insertEvaluationRun(ctx context.Context, runID string, resp *l
 }
 
 func (s *Service) fail(ctx context.Context, runID, provider, model, rawResponse, message string) {
-	if err := s.store.FinishExtractionFailed(ctx, runID, provider, model, PromptVersion, rawResponse, message); err != nil {
+	if err := s.store.FinishExtractionFailed(ctx, runID, provider, model, s.prompts.Version, rawResponse, message); err != nil {
 		s.logger.Error("failed to mark extraction failed", "run_id", runID, "error", err)
 	}
 }
@@ -993,191 +1014,4 @@ func normalizeLLMText(content string) string {
 		}
 	}
 	return content
-}
-
-func htmlFromImagePrompt() string {
-	return `Я отправляю тебе файл с вариантом школьной проверочной работы по английскому языку. Распознай текст и преобразуй его в корректный HTML-документ.
-
-Требования:
-1. Сначала полностью распознай текст из изображения или PDF, затем преобразуй его в HTML.
-2. В ответе пришли только содержимое HTML-файла без пояснений и комментариев.
-3. Не решай задания и не изменяй их формулировки.
-4. Сохраняй исходную структуру, порядок, нумерацию и текст полностью, ничего не удаляй и не переводи на другие языки
-5. Сгенерируй полноценный HTML-документ по правилам HTML5:
-   - обязательно добавь <!DOCTYPE html>;
-   - используй теги <html>, <head> и <body>;
-   - в <head> добавь <meta charset="UTF-8">;
-   - добавь осмысленный <title>.
-6. Каждое самостоятельное задание помещай под отдельный заголовок второго уровня (<h2>).
-7. Не разделяй одно задание на несколько заголовков:
-   - текст и вопросы/подзадания к нему являются одним заданием;
-   - диалог и задания к нему являются одним заданием;
-   - таблица, текст, варианты ответов и связанные с ними вопросы являются одним заданием.
-8. Если вся работа состоит только из одного текста с несколькими вопросами или подзаданиями, оформи всё под одним заголовком <h2>.
-9. Вопросы внутри одного задания не оформляй как отдельные задания и не создавай для них отдельные <h2>.
-10. Используй семантически подходящие HTML-теги:
-   - <p> для абзацев;
-   - <ol>, <ul>, <li> для списков;
-   - <table>, <tr>, <td> для таблиц;
-   - <strong>, <em> при необходимости.
-11. Старайся сохранять визуальную структуру оригинала: переносы строк, списки, подпункты, варианты ответов и таблицы.
-12. Ответ оформи только в виде одного блока кода с triple backticks в начале и в конце.`
-}
-
-func parametersPrompt(taskHTML string) string {
-	return `Я отправляю тебе задание из школьной проверочной по английскому языку в виде html заголовка второго уровня. По данным из файла определи параметры, которые я опишу ниже. Выбери один вариант из списка возможных значений (если они указаны), если значение параметра определить не удалось используй "*". 
-
-Параметры
-
-Тип задания: Множественный выбор (Multiple choicef) | Альтернативный выбор (True/False) | Перекрестный выбор (Matching) | Упорядочение (Rearrangement) | Заполнение пропусков (Completion) | Вставка слова в нужной форме / Трансформация (Transformation) | Ответ на вопрос (Answering questions) | Перевод (Translation) | Диалог / Интервью (Dialogue / Interview) | Обсуждение (Discussion) | Написание письма / эссе (Letter / Essay writing)
-
-Предполагаемый класс: 1-11
-
-Уровень сложности задания: 1-10
-
-в ответе перечисли только эти параметры и их значения. Писать свои комментарии и дополнительный текст не нужно. Пример вывода:
-
-Тип задания: Перекрестный выбор (Matching)
-Предполагаемый класс: 10
-Уровень сложности задания: 7
-
-<task_html>
-` + taskHTML + `
-</task_html>`
-}
-
-func generationPrompt(taskHTML string, params taskParameters, userComment string) string {
-	prompt := `Я отправляю тебе задание в виде HTML под заголовком второго уровня. Необходимо на его основе создать ещё один новый вариант такого же задания.
-
-Было определено, что это задание имеет следующие параметры:
-
-<params>
-` + formatTaskParameters(params) + `
-</params>
-
-Перед генерацией нового варианта:
-1. Определи, какие части задания можно изменять, а какие нельзя, чтобы не нарушить структуру и логику задания.
-2. Не изменяй:
-   - тип задания;
-   - структуру задания;
-   - способ оформления;
-   - количество элементов, если это важно для логики;
-   - индексы букв, цифр и обозначений, если их изменение может нарушить соответствия.
-3. Следующий текст запрещено изменять (если указан "-", изменения допустимы на твоё усмотрение):
--
-
-Допустимые изменения для создания нового варианта:
-- замена контекста и ситуации при сохранении логики;
-- изменение имён, названий, мест, предметов;
-- изменение порядка элементов;
-- синонимическая замена неключевых формулировок;
-- замена текста, вопросов и вариантов ответов на новые аналогичного уровня сложности;
-- изменение деталей без изменения типа навыка и сложности задания.
-
-ВАЖНО:
-1. Если в оригинале инструкция к заданию написана на русском языке — сохрани инструкцию на русском языке.
-2. Всё содержимое самого задания по английскому языку должно быть только на английском языке:
-   - тексты;
-   - диалоги;
-   - вопросы;
-   - варианты ответов;
-   - слова и фразы для сопоставления.
-3. Не переводи английское содержимое задания на русский язык.
-4. Новый вариант должен быть полностью новым по содержанию, но аналогичным по структуре, формату и уровню сложности.
-5. Не добавляй ответы, пояснения или решения.`
-
-	if strings.TrimSpace(userComment) != "" {
-		prompt += `
-
-Дополнительный комментарий пользователя:
-` + strings.TrimSpace(userComment)
-	}
-
-	prompt += `
-
-В качестве ответа пришли только содержимое нового варианта  в html-формате под заголовком второго уровня без дополнительного текста и комментариев.
-
-<task_html>
-` + taskHTML + `
-</task_html>`
-	return prompt
-}
-
-func selfEvaluationPrompt(sourceHTML, variantHTML string) string {
-	return `Я прикрепил два файла. Первый файл - эталонный учебный вариант. Второй файл - сгенерированный новый вариант.
-
-Проверь, насколько второй вариант соответствует первому по структуре, уровню сложности, типам заданий, объему, формулировкам и учебной логике.
-
-Оцени по шкале от 1 до 10:
-1. Что сохранено хорошо.
-2. Где есть отличия или ошибки.
-3. Можно ли использовать второй вариант для ученика.
-4. Что нужно исправить, чтобы он стал ближе к эталону.
-
-Не требуй полного совпадения чисел и условий, если смысл, сложность и формат заданий сохранены. В ответе укажи итоговую оценку 1-10. Больше ничего не пиши. Пример ответа:
-4
-
-Верни только одно число от 1 до 10.
-
-<эталонный_вариант>
-` + sourceHTML + `
-</эталонный_вариант>
-
-<сгенерированный_вариант>
-` + variantHTML + `
-</сгенерированный_вариант>`
-}
-
-func defaultSourceHTML() string {
-	return `<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="UTF-8">
-  <title>Тема 10 № 39</title>
-</head>
-<body>
-<h1>Тема 10 № 39</h1>
-<h2>Задание 1</h2>
-<p>Установите соответствие между заголовками 1-8 и текстами A-G. Запишите свои ответы в таблицу. Используйте каждую цифру только один раз. В задании один лишний заголовок.</p>
-<ol>
-  <li>Places to stay in.</li>
-  <li>Arts and culture.</li>
-  <li>New country image.</li>
-  <li>Going out.</li>
-  <li>Different landscapes.</li>
-  <li>Transport system.</li>
-  <li>National languages.</li>
-  <li>Eating out.</li>
-</ol>
-<p>A. Belgium has always had a lot more than the faceless administrative buildings that you can see in the outskirts of its capital, Brussels. A number of beautiful historic cities and Brussels itself offer impressive architecture, lively nightlife, first-rate restaurants and numerous other attractions for out visitors. Today, the old-fashioned idea of 'boring Belgium' has been well and truly forgotten, as more and more people discover its very individual charms for themselves.</p>
-<p>B. Nature in Belgium is varied. The rivers and hills of the Ardennes in the southeast contrast sharply with the rolling plains which make up much of the northern and western countryside. The most notable features are the great forest near the frontier with Germany and Luxembourg and the wide, sandy beaches of the northern coast.</p>
-<p>C. It is easy both to enter and to travel around pocket-sized Belgium which is divided into the Dutch-speaking north and the French-speaking south. Officially the Belgians speak French and German, Dutch is spoken slightly more widely than French, and German is spoken the least. The Belgians, living in the north, will often prefer to answer visitors in English rather than French, even if the visitor's French is good.</p>
-<p>D. Belgium has a wide range of hotels from 5-star luxury to small family pensions and inns. In some regions of the country, farm holidays are available. There visitors can (for a small cost) participate in the daily work of the farm. There are plenty of opportunities to rent furnished villas, flats, rooms, or bungalows for a holiday period. These holiday houses and flats are comfortable and well-equipped.</p>
-<p>E. The Belgian style of cooking is similar to French, based on meat and seafood. Each region in Belgium has its own special dish. Butter, cream, beer and wine are generally used in cooking. The Belgians are keen on their food, and the country is very well supplied with excellent restaurants to suit all budgets. The perfect evening out here involves a delicious meal, and the restaurants and cafes are busy at all times of the week.</p>
-<p>F. As well as being one of the best cities in the world for eating out (both for its high quality and range), Brussels has a very active and varied nightlife. It has 10 theatres which produce plays in both Dutch and French. There are also dozens of cinemas, numerous discos and many other night-time cafes in Brussels. Elsewhere, the nightlife choices depend on the size of the town, but there is no shortage of fun to be had in any of the major cities.</p>
-<p>G. There is a good system of underground trains, trams and buses in all the major towns and cities. In addition, Belgium's waterways offer a pleasant way to enjoy the country. Visitors can take a one-hour cruise around the canals of Bruges (sometimes described as the Venice of the North) or an extended cruise along the rivers and canals linking the major cities of Belgium and the Netherlands.</p>
-<table>
-  <tr>
-    <th>Текст</th>
-    <th>A</th>
-    <th>B</th>
-    <th>C</th>
-    <th>D</th>
-    <th>E</th>
-    <th>F</th>
-    <th>G</th>
-  </tr>
-  <tr>
-    <td>Заголовок</td>
-    <td></td>
-    <td></td>
-    <td></td>
-    <td></td>
-    <td></td>
-    <td></td>
-    <td></td>
-  </tr>
-</table>
-</body>
-</html>`
 }

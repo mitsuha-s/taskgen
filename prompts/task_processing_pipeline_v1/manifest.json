@@ -1,0 +1,10 @@
+{
+  "version": "task_processing_pipeline_v1",
+  "files": {
+    "html_from_image": "step1_image_to_html.md",
+    "parameters": "step2_parameters.md",
+    "generation": "step3_generate_variant.md",
+    "self_evaluation": "step4_self_evaluate.md",
+    "default_source": "default_source.html"
+  }
+}

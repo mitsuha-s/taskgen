@@ -17,19 +17,21 @@ FROM alpine:3.22
 WORKDIR /app
 RUN apk add --no-cache ca-certificates \
     && adduser -D -H app \
-    && mkdir -p /app/storage/uploads /app/frontend/dist /app/migrations \
+    && mkdir -p /app/storage/uploads /app/frontend/dist /app/migrations /app/prompts \
     && chown -R app:app /app/storage
 COPY certs/russian-trusted-sub-ca.crt /usr/local/share/ca-certificates/russian-trusted-sub-ca.crt
 COPY certs/russian-trusted-root-ca.crt /usr/local/share/ca-certificates/russian-trusted-root-ca.crt
 COPY --from=backend-builder /out/api /app/api
 COPY --from=backend-builder /src/backend/migrations /app/migrations
 COPY --from=frontend-builder /src/frontend/dist /app/frontend/dist
+COPY prompts /app/prompts
 RUN update-ca-certificates \
-    && chown -R app:app /app/api /app/frontend /app/migrations \
-    && chmod -R u=rwX,go=rX /app/api /app/frontend /app/migrations
+    && chown -R app:app /app/api /app/frontend /app/migrations /app/prompts \
+    && chmod -R u=rwX,go=rX /app/api /app/frontend /app/migrations /app/prompts
 ENV HTTP_ADDR=:8080 \
     FRONTEND_DIST_DIR=/app/frontend/dist \
     MIGRATIONS_DIR=/app/migrations \
+    PROMPTS_DIR=/app/prompts/task_processing_pipeline_v1 \
     FILE_STORAGE_DIR=/app/storage/uploads
 EXPOSE 8080
 VOLUME ["/app/storage/uploads"]
