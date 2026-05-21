@@ -24,6 +24,8 @@ export type RunSummary = {
   status: string;
 };
 
+export type LLMProvider = 'gigachat' | 'openai';
+
 export type ExtractionRun = {
   id: string;
   assignment_id: string;
@@ -132,10 +134,13 @@ export const api = {
       },
     );
   },
-  startExtraction: (assignmentId: string) =>
-    request<{ extraction_run_id: string; status: string }>(
+  startExtraction: (assignmentId: string, provider?: LLMProvider) =>
+    request<{ extraction_run_id: string; status: string; provider?: string }>(
       `/api/assignments/${assignmentId}/extract`,
-      { method: 'POST' },
+      {
+        method: 'POST',
+        body: JSON.stringify(provider ? { llm_provider: provider } : {}),
+      },
     ),
   getAssignment: (assignmentId: string) =>
     request<Assignment>(`/api/assignments/${assignmentId}`),

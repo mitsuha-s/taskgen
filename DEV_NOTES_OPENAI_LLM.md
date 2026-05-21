@@ -10,6 +10,8 @@ Branch: `openai-llm`
 - Use OpenAI Responses API over direct Chat Completions because the official vision guide shows image input through Responses with `input_image`.
 - Default OpenAI model is `gpt-4.1-mini`, matching current OpenAI vision examples; override with `OPENAI_MODEL`.
 - Do not call OpenAI in verification. With no `OPENAI_API_KEY`, the provider returns `ErrProviderNotConfigured` before any HTTP request.
+- The new-assignment screen sends `llm_provider` with the extraction start request. Existing API clients can omit it and use `LLM_PROVIDER`.
+- The final-step Lite/Pro selector remains GigaChat-specific. OpenAI currently uses `OPENAI_MODEL` for every step.
 
 ## Follow-ups
 

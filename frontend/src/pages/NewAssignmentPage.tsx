@@ -5,13 +5,18 @@ import { useEffect, useMemo, useState } from 'react';
 import { useForm, useWatch } from 'react-hook-form';
 import { useNavigate } from 'react-router-dom';
 import { z } from 'zod';
-import { api, userMessage } from '../lib/api';
+import { api, LLMProvider, userMessage } from '../lib/api';
 
 const maxFileSize = 10 * 1024 * 1024;
 const allowedTypes = ['image/jpeg', 'image/png', 'image/webp'];
+const providerOptions: Array<{ value: LLMProvider; label: string }> = [
+  { value: 'gigachat', label: 'GigaChat' },
+  { value: 'openai', label: 'OpenAI' },
+];
 
 const schema = z.object({
   title: z.string().max(160, 'Название слишком длинное.').optional(),
+  llmProvider: z.enum(['gigachat', 'openai']),
   file: z
     .custom<FileList>()
     .refine((files) => files?.length === 1, 'Выберите одно изображение.')
@@ -29,6 +34,7 @@ export default function NewAssignmentPage() {
     resolver: zodResolver(schema),
     defaultValues: {
       title: '',
+      llmProvider: 'gigachat',
     },
   });
 
@@ -37,10 +43,14 @@ export default function NewAssignmentPage() {
     mutationFn: ({ assignmentId, file }: { assignmentId: string; file: File }) =>
       api.uploadImage(assignmentId, file),
   });
-  const startExtraction = useMutation({ mutationFn: api.startExtraction });
+  const startExtraction = useMutation({
+    mutationFn: ({ assignmentId, provider }: { assignmentId: string; provider: LLMProvider }) =>
+      api.startExtraction(assignmentId, provider),
+  });
   const isSubmitting = createAssignment.isPending || uploadImage.isPending || startExtraction.isPending;
 
   const watchedFiles = useWatch({ control: form.control, name: 'file' });
+  const selectedProvider = useWatch({ control: form.control, name: 'llmProvider' });
   const selectedFile = watchedFiles?.[0];
   const selectedFileLabel = useMemo(() => {
     if (!selectedFile) {
@@ -70,7 +80,7 @@ export default function NewAssignmentPage() {
       const file = values.file[0];
       const assignment = await createAssignment.mutateAsync(values.title ?? '');
       await uploadImage.mutateAsync({ assignmentId: assignment.id, file });
-      const run = await startExtraction.mutateAsync(assignment.id);
+      const run = await startExtraction.mutateAsync({ assignmentId: assignment.id, provider: values.llmProvider });
       navigate(`/assignments/${assignment.id}/review?run=${run.extraction_run_id}`);
     } catch (error) {
       setSubmitError(userMessage(error));
@@ -92,7 +102,7 @@ export default function NewAssignmentPage() {
           <div className="grid gap-2 sm:grid-cols-3 lg:min-w-[460px]">
             <HeaderMetric icon={FileImage} label="Форматы" value="PNG JPG WEBP" />
             <HeaderMetric icon={Gauge} label="Лимит" value="10 MB" />
-            <HeaderMetric icon={ScanLine} label="Режим" value="Vision AI" />
+            <HeaderMetric icon={ScanLine} label="Провайдер" value={providerLabel(selectedProvider)} />
           </div>
         </div>
       </section>
@@ -116,6 +126,34 @@ export default function NewAssignmentPage() {
               />
               {form.formState.errors.title ? (
                 <p className="text-sm text-red-700">{form.formState.errors.title.message}</p>
+              ) : null}
+            </div>
+
+            <div className="space-y-2">
+              <span className="label">LLM-провайдер</span>
+              <div className="grid grid-cols-2 rounded-lg border border-slate-300 bg-slate-100 p-1">
+                {providerOptions.map((provider) => {
+                  const checked = selectedProvider === provider.value;
+                  return (
+                    <label
+                      key={provider.value}
+                      className={`flex h-10 cursor-pointer items-center justify-center rounded-md px-3 text-sm font-semibold transition ${
+                        checked ? 'bg-graphite text-white shadow-sm' : 'text-slate-700 hover:bg-white/70'
+                      }`}
+                    >
+                      <input
+                        className="sr-only"
+                        type="radio"
+                        value={provider.value}
+                        {...form.register('llmProvider')}
+                      />
+                      {provider.label}
+                    </label>
+                  );
+                })}
+              </div>
+              {form.formState.errors.llmProvider ? (
+                <p className="text-sm text-red-700">{form.formState.errors.llmProvider.message}</p>
               ) : null}
             </div>
 
@@ -182,6 +220,10 @@ export default function NewAssignmentPage() {
       </form>
     </div>
   );
+}
+
+function providerLabel(value: LLMProvider | undefined) {
+  return providerOptions.find((provider) => provider.value === value)?.label ?? 'GigaChat';
 }
 
 function HeaderMetric({ icon: Icon, label, value }: { icon: typeof Cpu; label: string; value: string }) {

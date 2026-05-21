@@ -79,6 +79,8 @@ export default function ReviewPage() {
   const isRunning = data?.status === 'pending' || data?.status === 'running' || run.isLoading;
   const canContinue = data?.status === 'awaiting_confirmation' && data.current_step < totalSteps;
   const imageURL = assignment.data?.image?.url;
+  const runProvider = data?.provider ?? '';
+  const isGigaChatRun = runProvider === 'gigachat';
 
   if (!id || !runId) {
     return (
@@ -99,7 +101,8 @@ export default function ReviewPage() {
             </span>
             <h1 className="mt-4 text-2xl font-semibold leading-tight text-white sm:text-3xl">Пайплайн обработки задания</h1>
             <p className="mt-2 text-sm leading-6 text-slate-300">
-              {assignment.data?.title || 'Эталонное задание'} · шаг {data?.current_step ?? 1} из {totalSteps}
+              {assignment.data?.title || 'Эталонное задание'} · шаг {data?.current_step ?? 1} из {totalSteps} · провайдер:{' '}
+              {providerLabel(runProvider)}
             </p>
           </div>
           <div className="flex flex-col gap-3 sm:flex-row lg:flex-col lg:items-end">
@@ -161,9 +164,10 @@ export default function ReviewPage() {
                 onSave={(step, content) => updateStep.mutateAsync({ step, content })}
                 onSaveAndContinue={async (step, content) => {
                   await updateStep.mutateAsync({ step, content });
-                  await continueRun.mutateAsync(step === 3 ? finalModel : undefined);
+                  await continueRun.mutateAsync(step === 3 && isGigaChatRun ? finalModel : undefined);
                 }}
                 finalModel={finalModel}
+                showFinalModel={isGigaChatRun}
                 onFinalModelChange={setFinalModel}
                 onRegenerate={(step) => regenerateStep.mutate(step)}
               />
@@ -244,6 +248,7 @@ function PipelineResults({
   onSave,
   onSaveAndContinue,
   finalModel,
+  showFinalModel,
   onFinalModelChange,
   onRegenerate,
 }: {
@@ -254,6 +259,7 @@ function PipelineResults({
   onSave: (step: number, content: string) => Promise<unknown>;
   onSaveAndContinue: (step: number, content: string) => Promise<unknown>;
   finalModel: 'lite' | 'pro';
+  showFinalModel: boolean;
   onFinalModelChange: (value: 'lite' | 'pro') => void;
   onRegenerate: (step: number) => void;
 }) {
@@ -303,6 +309,7 @@ function PipelineResults({
                 content={step.content}
                 processing={processing}
                 finalModel={finalModel}
+                showFinalModel={showFinalModel}
                 onFinalModelChange={onFinalModelChange}
                 onSave={(content) => onSave(step.step, content)}
                 onSaveAndContinue={(content) => onSaveAndContinue(step.step, content)}
@@ -367,6 +374,7 @@ function VariationEditor({
   content,
   processing,
   finalModel,
+  showFinalModel,
   onFinalModelChange,
   onSave,
   onSaveAndContinue,
@@ -374,6 +382,7 @@ function VariationEditor({
   content: string;
   processing: boolean;
   finalModel: 'lite' | 'pro';
+  showFinalModel: boolean;
   onFinalModelChange: (value: 'lite' | 'pro') => void;
   onSave: (content: string) => Promise<unknown>;
   onSaveAndContinue: (content: string) => Promise<unknown>;
@@ -428,18 +437,20 @@ function VariationEditor({
         <label className="label" htmlFor="variation-comment">Комментарий к генерации</label>
         <textarea id="variation-comment" className="field min-h-24" value={comment} onChange={(event) => setComment(event.target.value)} placeholder="Например: сохранить формат ответов, не менять количество пунктов" />
       </div>
-      <div className="space-y-1.5">
-        <label className="label" htmlFor="final-model">Модель для шага 4 (финальный вариант)</label>
-        <select
-          id="final-model"
-          className="field"
-          value={finalModel}
-          onChange={(event) => onFinalModelChange(event.target.value as 'lite' | 'pro')}
-        >
-          <option value="pro">Pro</option>
-          <option value="lite">Lite</option>
-        </select>
-      </div>
+      {showFinalModel ? (
+        <div className="space-y-1.5">
+          <label className="label" htmlFor="final-model">Модель для шага 4 (финальный вариант)</label>
+          <select
+            id="final-model"
+            className="field"
+            value={finalModel}
+            onChange={(event) => onFinalModelChange(event.target.value as 'lite' | 'pro')}
+          >
+            <option value="pro">Pro</option>
+            <option value="lite">Lite</option>
+          </select>
+        </div>
+      ) : null}
       <EditorActions processing={processing} onSave={() => onSave(value)} onSaveAndContinue={() => onSaveAndContinue(value)} />
     </div>
   );
@@ -787,6 +798,19 @@ function statusLabel(status: string) {
       return 'ошибка';
     default:
       return 'загрузка';
+  }
+}
+
+function providerLabel(provider: string) {
+  switch (provider) {
+    case 'gigachat':
+      return 'GigaChat';
+    case 'openai':
+      return 'OpenAI';
+    case 'mock':
+      return 'Mock';
+    default:
+      return 'не выбран';
   }
 }
 
