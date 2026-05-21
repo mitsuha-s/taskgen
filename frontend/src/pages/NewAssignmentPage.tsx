@@ -2,6 +2,7 @@ import { zodResolver } from '@hookform/resolvers/zod';
 import { useMutation } from '@tanstack/react-query';
 import { Cpu, FileImage, Gauge, ImagePlus, Loader2, ScanLine, UploadCloud } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
+import type { DragEvent } from 'react';
 import { useForm, useWatch } from 'react-hook-form';
 import { useNavigate } from 'react-router-dom';
 import { z } from 'zod';
@@ -29,6 +30,7 @@ type FormValues = z.infer<typeof schema>;
 export default function NewAssignmentPage() {
   const navigate = useNavigate();
   const [submitError, setSubmitError] = useState<string | null>(null);
+  const [isDraggingFile, setIsDraggingFile] = useState(false);
 
   const form = useForm<FormValues>({
     resolver: zodResolver(schema),
@@ -60,7 +62,7 @@ export default function NewAssignmentPage() {
     return `${selectedFile.name} · ${sizeMB.toFixed(2)} MB`;
   }, [selectedFile]);
   const previewURL = useMemo(() => {
-    if (!selectedFile) {
+    if (!selectedFile || !allowedTypes.includes(selectedFile.type)) {
       return null;
     }
     return URL.createObjectURL(selectedFile);
@@ -73,6 +75,46 @@ export default function NewAssignmentPage() {
       }
     };
   }, [previewURL]);
+
+  useEffect(() => {
+    function onPaste(event: ClipboardEvent) {
+      const file = fileFromClipboard(event.clipboardData);
+      if (!file) {
+        return;
+      }
+      event.preventDefault();
+      setFormFile(file);
+    }
+
+    window.addEventListener('paste', onPaste);
+    return () => window.removeEventListener('paste', onPaste);
+  });
+
+  function setFormFile(file: File) {
+    const dataTransfer = new DataTransfer();
+    dataTransfer.items.add(file);
+    form.setValue('file', dataTransfer.files, {
+      shouldDirty: true,
+      shouldTouch: true,
+      shouldValidate: true,
+    });
+  }
+
+  function onDropFile(event: DragEvent<HTMLLabelElement>) {
+    event.preventDefault();
+    setIsDraggingFile(false);
+    const file = fileFromFileList(event.dataTransfer.files);
+    if (file) {
+      setFormFile(file);
+    }
+  }
+
+  function onDragOverFile(event: DragEvent<HTMLLabelElement>) {
+    if (event.dataTransfer.types.includes('Files')) {
+      event.preventDefault();
+      setIsDraggingFile(true);
+    }
+  }
 
   async function onSubmit(values: FormValues) {
     setSubmitError(null);
@@ -162,8 +204,14 @@ export default function NewAssignmentPage() {
                 Изображение задания
               </label>
               <label
-                className="scan-frame flex min-h-48 cursor-pointer flex-col items-center justify-center gap-3 border-dashed px-4 py-8 text-center transition hover:border-ai hover:bg-cyan-50/60"
+                className={`scan-frame flex min-h-48 cursor-pointer flex-col items-center justify-center gap-3 border-dashed px-4 py-8 text-center transition hover:border-ai hover:bg-cyan-50/60 ${
+                  isDraggingFile ? 'border-ai bg-cyan-50/70 ring-2 ring-ai/20' : ''
+                }`}
                 htmlFor="file"
+                onDragEnter={onDragOverFile}
+                onDragLeave={() => setIsDraggingFile(false)}
+                onDragOver={onDragOverFile}
+                onDrop={onDropFile}
               >
                 <span className="relative z-10 flex h-12 w-12 items-center justify-center rounded-md border border-cyan-200 bg-white text-ai shadow-sm">
                   <ImagePlus className="h-6 w-6" aria-hidden="true" />
@@ -224,6 +272,25 @@ export default function NewAssignmentPage() {
 
 function providerLabel(value: LLMProvider | undefined) {
   return providerOptions.find((provider) => provider.value === value)?.label ?? 'GigaChat';
+}
+
+function fileFromClipboard(data: DataTransfer | null) {
+  if (!data) {
+    return null;
+  }
+  for (const item of Array.from(data.items)) {
+    if (item.kind === 'file') {
+      const file = item.getAsFile();
+      if (file) {
+        return file;
+      }
+    }
+  }
+  return fileFromFileList(data.files);
+}
+
+function fileFromFileList(files: FileList) {
+  return files[0] ?? null;
 }
 
 function HeaderMetric({ icon: Icon, label, value }: { icon: typeof Cpu; label: string; value: string }) {
