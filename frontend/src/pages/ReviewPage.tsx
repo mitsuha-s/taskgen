@@ -1,10 +1,26 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { AlertCircle, ArrowRight, CheckCircle2, Download, Loader2, Plus, RotateCcw, Save, Trash2 } from 'lucide-react';
+import {
+  AlertCircle,
+  ArrowRight,
+  BrainCircuit,
+  CheckCircle2,
+  ClipboardCheck,
+  Download,
+  FileText,
+  ListChecks,
+  Loader2,
+  Plus,
+  RotateCcw,
+  Save,
+  ScanText,
+  Trash2,
+} from 'lucide-react';
 import { useRef, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { api, PipelineStepResult, userMessage } from '../lib/api';
 
 const totalSteps = 4;
+const pipelineStepNames = ['Сканирование', 'Параметры', 'Вариации', 'Финал'];
 
 export default function ReviewPage() {
   const { id } = useParams<{ id: string }>();
@@ -74,18 +90,28 @@ export default function ReviewPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-        <div>
-          <h1 className="text-2xl font-semibold text-ink">Пайплайн обработки задания</h1>
-          <p className="mt-1 text-sm text-slate-600">
-            {assignment.data?.title || 'Эталонное задание'} · шаг {data?.current_step ?? 1} из {totalSteps} · статус:{' '}
-            {statusLabel(data?.status ?? 'loading')}
-          </p>
+      <section className="surface-dark machine-grid overflow-hidden p-5 sm:p-6">
+        <div className="flex flex-col gap-5 lg:flex-row lg:items-start lg:justify-between">
+          <div className="max-w-3xl">
+            <span className="status-chip border-cyan-300/30 bg-white/[0.08] text-cyan-100">
+              <BrainCircuit className="h-3.5 w-3.5" aria-hidden="true" />
+              AI-контроль
+            </span>
+            <h1 className="mt-4 text-2xl font-semibold leading-tight text-white sm:text-3xl">Пайплайн обработки задания</h1>
+            <p className="mt-2 text-sm leading-6 text-slate-300">
+              {assignment.data?.title || 'Эталонное задание'} · шаг {data?.current_step ?? 1} из {totalSteps}
+            </p>
+          </div>
+          <div className="flex flex-col gap-3 sm:flex-row lg:flex-col lg:items-end">
+            <span className={statusBadgeClass(data?.status ?? 'loading')}>{statusLabel(data?.status ?? 'loading')}</span>
+            <Link className="btn-secondary border-slate-600 bg-white/10 text-white hover:border-cyan-300/50 hover:bg-white/15" to="/assignments/new">
+              <Plus className="h-4 w-4" aria-hidden="true" />
+              Новое задание
+            </Link>
+          </div>
         </div>
-        <Link className="btn-secondary" to="/assignments/new">
-          Новое задание
-        </Link>
-      </div>
+        <PipelineProgress currentStep={data?.current_step ?? 1} status={data?.status ?? 'loading'} />
+      </section>
 
       {(assignment.isError || run.isError) && (
         <div className="panel border-red-200 bg-red-50 p-4 text-sm text-red-800">
@@ -93,27 +119,39 @@ export default function ReviewPage() {
         </div>
       )}
 
-      <section className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(420px,1fr)]">
+      <section className="grid gap-6 xl:grid-cols-[minmax(0,0.95fr)_minmax(520px,1.05fr)]">
         <div className="panel overflow-hidden">
-          <div className="border-b border-slate-200 px-4 py-3 text-sm font-medium text-slate-800">
-            Оригинальное изображение
+          <div className="panel-heading flex items-center justify-between gap-3">
+            <span className="flex items-center gap-2">
+              <ScanText className="h-4 w-4 text-ai" aria-hidden="true" />
+              Оригинальное изображение
+            </span>
+            <span className="rounded border border-slate-300 bg-white px-2 py-0.5 text-[11px] font-semibold uppercase text-slate-500">
+              Эталон
+            </span>
           </div>
-          <div className="flex min-h-[520px] items-center justify-center bg-slate-100 p-4">
+          <div className="scan-frame flex min-h-[520px] items-center justify-center rounded-none border-0 bg-slate-100 p-4">
             {imageURL ? (
-              <a href={imageURL} target="_blank" rel="noreferrer" className="block w-full">
-                <img className="max-h-[720px] w-full rounded-md object-contain" src={imageURL} alt="Оригинальное задание" />
+              <a href={imageURL} target="_blank" rel="noreferrer" className="relative z-10 block w-full">
+                <img className="max-h-[720px] w-full rounded-md border border-slate-200 bg-white object-contain shadow-sm" src={imageURL} alt="Оригинальное задание" />
               </a>
             ) : (
-              <div className="text-sm text-slate-500">Загружаем изображение...</div>
+              <div className="relative z-10 rounded-md border border-slate-200 bg-white/80 px-4 py-3 text-sm text-slate-500 shadow-sm">Загружаем изображение...</div>
             )}
           </div>
         </div>
 
         <div className="panel overflow-hidden">
-          <div className="border-b border-slate-200 px-4 py-3 text-sm font-medium text-slate-800">
-            Результаты обработки
+          <div className="panel-heading flex items-center justify-between gap-3">
+            <span className="flex items-center gap-2">
+              <ListChecks className="h-4 w-4 text-ai" aria-hidden="true" />
+              Результаты обработки
+            </span>
+            <span className="rounded border border-slate-300 bg-white px-2 py-0.5 text-[11px] font-semibold uppercase text-slate-500">
+              Запуск
+            </span>
           </div>
-          <div className="space-y-4 p-4">
+          <div className="space-y-4 bg-slate-50/60 p-4">
             {steps.length > 0 ? (
               <PipelineResults
                 steps={steps}
@@ -162,6 +200,42 @@ export default function ReviewPage() {
   );
 }
 
+function PipelineProgress({ currentStep, status }: { currentStep: number; status: string }) {
+  return (
+    <div className="mt-6 grid gap-2 sm:grid-cols-4">
+      {pipelineStepNames.map((name, index) => {
+        const step = index + 1;
+        const isDone = status === 'succeeded' || step < currentStep;
+        const isActive = step === currentStep && status !== 'succeeded';
+        return (
+          <div
+            key={name}
+            className={`rounded-md border p-3 ${
+              isActive
+                ? 'border-cyan-300/50 bg-cyan-300/10'
+                : isDone
+                  ? 'border-emerald-300/30 bg-emerald-300/10'
+                  : 'border-white/10 bg-white/[0.06]'
+            }`}
+          >
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-xs font-semibold uppercase text-slate-400">Шаг {step}</span>
+              {isDone ? (
+                <CheckCircle2 className="h-4 w-4 text-emerald-300" aria-hidden="true" />
+              ) : isActive ? (
+                <Loader2 className="h-4 w-4 animate-spin text-cyan-200" aria-hidden="true" />
+              ) : (
+                <ClipboardCheck className="h-4 w-4 text-slate-500" aria-hidden="true" />
+              )}
+            </div>
+            <div className="mt-2 text-sm font-semibold text-white">{name}</div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function PipelineResults({
   steps,
   currentStep,
@@ -187,17 +261,31 @@ function PipelineResults({
     <div className="space-y-3">
       {steps.map((step) => {
         const isEditableCheckpoint = canEdit && step.step === currentStep && (step.step === 2 || step.step === 3);
+        const isCurrent = step.step === currentStep;
+        const stepState = step.step < currentStep ? 'Готово' : isCurrent ? 'Активный шаг' : 'Ожидает';
         return (
-          <article key={`${step.step}-${step.key}`} className="rounded-lg border border-slate-200 bg-white">
-            <div className="flex flex-col gap-2 border-b border-slate-200 px-3 py-2 sm:flex-row sm:items-center sm:justify-between">
+          <article
+            key={`${step.step}-${step.key}`}
+            className={`overflow-hidden rounded-lg border bg-white shadow-sm ${
+              isCurrent ? 'border-cyan-300 shadow-cyan-900/5' : 'border-slate-200'
+            }`}
+          >
+            <div className="flex flex-col gap-3 border-b border-slate-200 bg-white px-3 py-3 sm:flex-row sm:items-center sm:justify-between">
               <div className="flex items-center gap-2">
-                <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-slate-900 text-xs font-semibold text-white">
+                <span
+                  className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-xs font-semibold ${
+                    isCurrent ? 'bg-ai text-white' : 'bg-slate-900 text-white'
+                  }`}
+                >
                   {step.step}
                 </span>
-                <h2 className="text-sm font-semibold text-slate-900">{step.title}</h2>
+                <div>
+                  <h2 className="text-sm font-semibold text-slate-900">{step.title}</h2>
+                  <div className="mt-0.5 text-xs font-medium text-slate-500">{stepState}</div>
+                </div>
               </div>
               {canEdit ? (
-                <button className="btn-secondary px-3 py-1.5 text-xs" disabled={processing} onClick={() => onRegenerate(step.step)} type="button">
+                <button className="btn-secondary h-8 px-3 text-xs" disabled={processing} onClick={() => onRegenerate(step.step)} type="button">
                   {processing ? <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" /> : <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />}
                   Перегенерировать
                 </button>
@@ -220,7 +308,7 @@ function PipelineResults({
                 onSaveAndContinue={(content) => onSaveAndContinue(step.step, content)}
               />
             ) : (
-              <pre className="max-h-[420px] overflow-auto whitespace-pre-wrap break-words p-3 text-sm leading-6 text-slate-800">
+              <pre className="max-h-[420px] overflow-auto whitespace-pre-wrap break-words bg-slate-50 p-4 text-sm leading-6 text-slate-800">
                 {step.content}
               </pre>
             )}
@@ -263,7 +351,7 @@ function ParameterEditor({
   const value = formatParameters({ subject, taskType, schoolClass, difficulty });
 
   return (
-    <div className="space-y-4 p-4">
+    <div className="space-y-4 bg-cyan-50/30 p-4">
       <div className="grid gap-3 sm:grid-cols-2">
         <SelectField label="Предметная область" value={subject} options={subjectOptions} onChange={setSubject} />
         <SelectField label="Тип задания" value={taskType} options={taskTypeOptions} onChange={setTaskType} />
@@ -311,27 +399,27 @@ function VariationEditor({
   }
 
   return (
-    <div className="space-y-4 p-4">
-      <div className="space-y-2">
+    <div className="space-y-4 bg-cyan-50/30 p-4">
+      <div className="grid gap-2">
         {variationOptions.map((rule) => (
-          <label key={rule} className="flex items-start gap-2 rounded-md border border-slate-200 bg-slate-50 p-3 text-sm text-slate-800">
-            <input className="mt-1" type="checkbox" checked={selected.includes(rule)} onChange={() => toggle(rule)} />
+          <label key={rule} className="flex items-start gap-3 rounded-md border border-slate-200 bg-white p-3 text-sm text-slate-800 shadow-sm transition hover:border-cyan-300">
+            <input className="mt-1 accent-ai" type="checkbox" checked={selected.includes(rule)} onChange={() => toggle(rule)} />
             <span>{rule}</span>
           </label>
         ))}
       </div>
       <div className="space-y-2">
         {selected.filter((rule) => !variationOptions.includes(rule)).map((rule) => (
-          <div key={rule} className="flex items-center justify-between gap-3 rounded-md border border-slate-200 px-3 py-2 text-sm">
+          <div key={rule} className="flex items-center justify-between gap-3 rounded-md border border-slate-200 bg-white px-3 py-2 text-sm shadow-sm">
             <span>{rule}</span>
-            <button className="btn-secondary px-2 py-1" type="button" onClick={() => toggle(rule)}>
+            <button className="btn-secondary h-8 px-2" type="button" onClick={() => toggle(rule)}>
               <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
             </button>
           </div>
         ))}
         <div className="flex gap-2">
           <input className="field" value={custom} onChange={(event) => setCustom(event.target.value)} placeholder="Добавить свое допустимое изменение" />
-          <button className="btn-secondary" type="button" onClick={addCustom}>
+          <button className="btn-secondary w-11 px-0" type="button" onClick={addCustom}>
             <Plus className="h-4 w-4" aria-hidden="true" />
           </button>
         </div>
@@ -361,7 +449,7 @@ function SelectField({ label, value, options, onChange }: { label: string; value
   return (
     <label className="space-y-1.5">
       <span className="label">{label}</span>
-      <select className="field" value={value} onChange={(event) => onChange(event.target.value)}>
+      <select className="field bg-white" value={value} onChange={(event) => onChange(event.target.value)}>
         {options.map((option) => (
           <option key={option} value={option}>{option}</option>
         ))}
@@ -387,9 +475,11 @@ function EditorActions({ processing, onSave, onSaveAndContinue }: { processing: 
 
 function RunningState({ step }: { step: number }) {
   return (
-    <div className="flex min-h-40 flex-col items-center justify-center gap-3 rounded-lg border border-cyan-200 bg-cyan-50 text-center text-sm text-cyan-900">
-      <Loader2 className="h-7 w-7 animate-spin text-cyan-700" aria-hidden="true" />
-      Выполняется шаг {step} из {totalSteps}
+    <div className="flex min-h-40 flex-col items-center justify-center gap-3 rounded-lg border border-cyan-200 bg-cyan-50/80 text-center text-sm text-cyan-950 shadow-sm">
+      <span className="flex h-12 w-12 items-center justify-center rounded-md border border-cyan-200 bg-white shadow-sm">
+        <Loader2 className="h-7 w-7 animate-spin text-ai" aria-hidden="true" />
+      </span>
+      <span className="font-semibold">Выполняется шаг {step} из {totalSteps}</span>
     </div>
   );
 }
@@ -399,7 +489,7 @@ function ContinueState({ step, onContinue, processing, hidden }: { step: number;
     return null;
   }
   return (
-    <div className="space-y-3 rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-950">
+    <div className="space-y-3 rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-950 shadow-sm">
       <div className="font-medium">Шаг {step} завершен. Проверьте промежуточный результат перед продолжением.</div>
       <button className="btn-primary" disabled={processing} onClick={onContinue} type="button">
         {processing ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" /> : <ArrowRight className="h-4 w-4" aria-hidden="true" />}
@@ -411,7 +501,7 @@ function ContinueState({ step, onContinue, processing, hidden }: { step: number;
 
 function CompletedState() {
   return (
-    <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-900">
+    <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-900 shadow-sm">
       <div className="flex items-center gap-2 font-medium">
         <CheckCircle2 className="h-4 w-4" aria-hidden="true" />
         Обработка завершена
@@ -459,10 +549,13 @@ function FinalDocumentCard({ markdown, title }: { markdown: string; title: strin
   }
 
   return (
-    <section className="space-y-3 rounded-lg border border-slate-200 bg-slate-50 p-4">
+    <section className="space-y-3 rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <h2 className="text-base font-semibold text-slate-950">Итоговое задание</h2>
+          <h2 className="flex items-center gap-2 text-base font-semibold text-slate-950">
+            <FileText className="h-4 w-4 text-ai" aria-hidden="true" />
+            Итоговое задание
+          </h2>
           <p className="mt-1 text-sm text-slate-600">Готовый вариант можно скачать в PDF.</p>
         </div>
         <button className="btn-primary" disabled={generating} onClick={downloadPDF} type="button">
@@ -474,7 +567,7 @@ function FinalDocumentCard({ markdown, title }: { markdown: string; title: strin
       <div className="overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm">
         <div ref={documentRef} className="bg-white px-10 py-9 text-slate-950">
           <div className="mb-7 border-b border-slate-200 pb-4">
-            <div className="text-xs font-semibold uppercase tracking-wider text-cyan-700">Вариант задания</div>
+            <div className="text-xs font-semibold uppercase text-ai">Вариант задания</div>
             <div className="mt-2 text-2xl font-semibold leading-tight text-slate-950">{title}</div>
           </div>
           <MarkdownDocument markdown={markdown} />
@@ -533,9 +626,11 @@ function MarkdownDocument({ markdown }: { markdown: string }) {
 
 function FailedState({ message, onRetry, retrying }: { message: string; onRetry: () => void; retrying: boolean }) {
   return (
-    <div className="space-y-4 rounded-lg border border-red-200 bg-red-50 p-4">
+    <div className="space-y-4 rounded-lg border border-red-200 bg-red-50 p-4 shadow-sm">
       <div className="flex gap-3">
-        <AlertCircle className="mt-0.5 h-5 w-5 shrink-0 text-red-700" aria-hidden="true" />
+        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-red-200 bg-white">
+          <AlertCircle className="h-5 w-5 text-red-700" aria-hidden="true" />
+        </span>
         <div>
           <div className="font-medium text-red-900">Не удалось обработать задание</div>
           <div className="mt-1 text-sm text-red-800">{message}</div>
@@ -692,5 +787,23 @@ function statusLabel(status: string) {
       return 'ошибка';
     default:
       return 'загрузка';
+  }
+}
+
+function statusBadgeClass(status: string) {
+  const base = 'inline-flex h-9 items-center justify-center rounded-md border px-3 text-xs font-semibold uppercase';
+  switch (status) {
+    case 'pending':
+    case 'running':
+    case 'loading':
+      return `${base} border-cyan-300/[0.35] bg-cyan-300/10 text-cyan-100`;
+    case 'awaiting_confirmation':
+      return `${base} border-amber-300/40 bg-amber-300/10 text-amber-100`;
+    case 'succeeded':
+      return `${base} border-emerald-300/40 bg-emerald-300/10 text-emerald-100`;
+    case 'failed':
+      return `${base} border-red-300/40 bg-red-300/10 text-red-100`;
+    default:
+      return `${base} border-slate-500 bg-white/[0.08] text-slate-200`;
   }
 }
