@@ -185,7 +185,7 @@ func (s *Store) GetImageByAssignmentID(ctx context.Context, assignmentID string)
 	return scanAssignmentImage(row)
 }
 
-func (s *Store) CreateExtractionRun(ctx context.Context, assignmentID, promptVersion string) (ExtractionRun, error) {
+func (s *Store) CreateExtractionRun(ctx context.Context, assignmentID, promptVersion, provider string) (ExtractionRun, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return ExtractionRun{}, err
@@ -193,14 +193,14 @@ func (s *Store) CreateExtractionRun(ctx context.Context, assignmentID, promptVer
 	defer tx.Rollback(ctx)
 
 	row := tx.QueryRow(ctx, `
-		INSERT INTO extraction_runs (assignment_id, prompt_version)
-		VALUES ($1, $2)
+		INSERT INTO extraction_runs (assignment_id, prompt_version, provider)
+		VALUES ($1, $2, nullif($3, ''))
 		RETURNING id::text, assignment_id::text, status, current_step, coalesce(provider, ''),
 			coalesce(model, ''), coalesce(prompt_version, ''), coalesce(raw_response, ''),
 			coalesce(parsed_content::text, 'null'), coalesce(step_results::text, '[]'),
 			coalesce(warnings::text, '[]'),
 			coalesce(error_message, ''), created_at, started_at, finished_at
-	`, assignmentID, promptVersion)
+	`, assignmentID, promptVersion, provider)
 	run, err := scanExtractionRun(row)
 	if err != nil {
 		return ExtractionRun{}, mapNoRows(err)

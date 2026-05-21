@@ -3,6 +3,7 @@ package llm
 import (
 	"context"
 	"errors"
+	"strings"
 )
 
 type VisionProvider interface {
@@ -54,24 +55,70 @@ type ProviderConfig struct {
 	GigaChatAPIBase   string
 	GigaChatVerifyTLS bool
 	GigaChatTimeout   int64
+	OpenAIAPIKey      string
+	OpenAIModel       string
+	OpenAIAPIBase     string
+	OpenAITimeout     int64
 }
 
-func NewProvider(cfg ProviderConfig) VisionProvider {
-	switch cfg.Name {
-	case "gigachat":
-		return NewGigaChatProvider(GigaChatConfig{
-			AuthKey:   cfg.GigaChatAuthKey,
-			Model:     cfg.GigaChatModel,
-			TextModel: cfg.GigaChatTextModel,
-			Scope:     cfg.GigaChatScope,
-			AuthURL:   cfg.GigaChatAuthURL,
-			APIBase:   cfg.GigaChatAPIBase,
-			VerifyTLS: cfg.GigaChatVerifyTLS,
-			Timeout:   cfg.GigaChatTimeout,
-		})
-	default:
-		return NewMockProvider()
+type ProviderRegistry struct {
+	defaultName string
+	providers   map[string]VisionProvider
+}
+
+func NewProviderRegistry(cfg ProviderConfig) *ProviderRegistry {
+	defaultName := NormalizeProviderName(cfg.Name)
+	if defaultName == "" {
+		defaultName = "mock"
+	}
+
+	return &ProviderRegistry{
+		defaultName: defaultName,
+		providers: map[string]VisionProvider{
+			"mock": NewMockProvider(),
+			"gigachat": NewGigaChatProvider(GigaChatConfig{
+				AuthKey:   cfg.GigaChatAuthKey,
+				Model:     cfg.GigaChatModel,
+				TextModel: cfg.GigaChatTextModel,
+				Scope:     cfg.GigaChatScope,
+				AuthURL:   cfg.GigaChatAuthURL,
+				APIBase:   cfg.GigaChatAPIBase,
+				VerifyTLS: cfg.GigaChatVerifyTLS,
+				Timeout:   cfg.GigaChatTimeout,
+			}),
+			"openai": NewOpenAIProvider(OpenAIConfig{
+				APIKey:  cfg.OpenAIAPIKey,
+				Model:   cfg.OpenAIModel,
+				APIBase: cfg.OpenAIAPIBase,
+				Timeout: cfg.OpenAITimeout,
+			}),
+		},
 	}
 }
 
+func NewProvider(cfg ProviderConfig) VisionProvider {
+	provider, _, err := NewProviderRegistry(cfg).Resolve(cfg.Name)
+	if err != nil {
+		return NewMockProvider()
+	}
+	return provider
+}
+
+func (r *ProviderRegistry) Resolve(name string) (VisionProvider, string, error) {
+	selected := NormalizeProviderName(name)
+	if selected == "" {
+		selected = r.defaultName
+	}
+	provider, ok := r.providers[selected]
+	if !ok {
+		return nil, "", ErrUnknownProvider
+	}
+	return provider, selected, nil
+}
+
+func NormalizeProviderName(name string) string {
+	return strings.ToLower(strings.TrimSpace(name))
+}
+
 var ErrProviderNotConfigured = errors.New("vision provider is not configured")
+var ErrUnknownProvider = errors.New("unknown vision provider")

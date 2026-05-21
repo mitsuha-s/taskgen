@@ -3,16 +3,22 @@ package httpapi
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
 
 	"teacher-assistant/backend/internal/db"
+	"teacher-assistant/backend/internal/extraction"
 	"teacher-assistant/backend/internal/files"
 )
 
 type createAssignmentRequest struct {
 	Title string `json:"title"`
+}
+
+type startExtractionRequest struct {
+	LLMProvider string `json:"llm_provider"`
 }
 
 func (s *Server) createAssignment(w http.ResponseWriter, r *http.Request) {
@@ -143,6 +149,14 @@ func (s *Server) uploadAssignmentImage(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) startExtraction(w http.ResponseWriter, r *http.Request) {
 	assignmentID := chi.URLParam(r, "assignmentID")
+	var req startExtractionRequest
+	if r.Body != nil {
+		err := json.NewDecoder(r.Body).Decode(&req)
+		if err != nil && !errors.Is(err, io.EOF) {
+			writeError(w, http.StatusBadRequest, "validation_error", "Invalid JSON body.")
+			return
+		}
+	}
 	if _, err := s.store.GetAssignment(r.Context(), assignmentID); err != nil {
 		if errors.Is(err, db.ErrNotFound) {
 			writeError(w, http.StatusNotFound, "assignment_not_found", "Assignment was not found.")
@@ -153,10 +167,16 @@ func (s *Server) startExtraction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	run, err := s.extraction.Start(r.Context(), assignmentID)
+	run, err := s.extraction.Start(r.Context(), assignmentID, extraction.StartOptions{
+		Provider: req.LLMProvider,
+	})
 	if err != nil {
 		if errors.Is(err, db.ErrNotFound) {
 			writeError(w, http.StatusNotFound, "image_not_found", "Assignment image was not found.")
+			return
+		}
+		if errors.Is(err, extraction.ErrInvalidProvider) {
+			writeError(w, http.StatusBadRequest, "invalid_llm_provider", "LLM provider must be gigachat or openai.")
 			return
 		}
 		s.logger.Error("failed to start extraction", "assignment_id", assignmentID, "error", err)
@@ -167,6 +187,7 @@ func (s *Server) startExtraction(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, map[string]any{
 		"extraction_run_id": run.ID,
 		"status":            run.Status,
+		"provider":          run.Provider,
 	})
 }
 

@@ -19,12 +19,17 @@ const totalPipelineSteps = 4
 var ErrPipelineNotReady = errors.New("pipeline is not waiting for confirmation")
 var ErrInvalidPipelineStep = errors.New("invalid pipeline step")
 var ErrInvalidFinalModel = errors.New("invalid final model")
+var ErrInvalidProvider = errors.New("invalid llm provider")
 
 type Service struct {
-	store    *db.Store
-	storage  *files.LocalStorage
-	provider llm.VisionProvider
-	logger   *slog.Logger
+	store     *db.Store
+	storage   *files.LocalStorage
+	providers *llm.ProviderRegistry
+	logger    *slog.Logger
+}
+
+type StartOptions struct {
+	Provider string
 }
 
 type ContinueOptions struct {
@@ -47,16 +52,20 @@ type pipelineContent struct {
 	Steps           []pipelineStepResult `json:"steps"`
 }
 
-func NewService(store *db.Store, storage *files.LocalStorage, provider llm.VisionProvider, logger *slog.Logger) *Service {
-	return &Service{store: store, storage: storage, provider: provider, logger: logger}
+func NewService(store *db.Store, storage *files.LocalStorage, providers *llm.ProviderRegistry, logger *slog.Logger) *Service {
+	return &Service{store: store, storage: storage, providers: providers, logger: logger}
 }
 
-func (s *Service) Start(ctx context.Context, assignmentID string) (db.ExtractionRun, error) {
+func (s *Service) Start(ctx context.Context, assignmentID string, options StartOptions) (db.ExtractionRun, error) {
 	if _, err := s.store.GetImageByAssignmentID(ctx, assignmentID); err != nil {
 		return db.ExtractionRun{}, err
 	}
+	_, providerName, err := s.providers.Resolve(options.Provider)
+	if err != nil {
+		return db.ExtractionRun{}, ErrInvalidProvider
+	}
 
-	run, err := s.store.CreateExtractionRun(ctx, assignmentID, PromptVersion)
+	run, err := s.store.CreateExtractionRun(ctx, assignmentID, PromptVersion, providerName)
 	if err != nil {
 		return db.ExtractionRun{}, err
 	}
@@ -79,7 +88,7 @@ func (s *Service) Continue(ctx context.Context, runID string, options ContinueOp
 		return db.ExtractionRun{}, err
 	}
 
-	finalModel, err := resolveFinalModel(options.FinalModel)
+	finalModel, err := resolveFinalModel(run.Provider, options.FinalModel)
 	if err != nil {
 		return db.ExtractionRun{}, err
 	}
@@ -175,7 +184,14 @@ func (s *Service) executeStep(runID string, step int, finalModel string) {
 	}
 
 	results := parsePipelineResults(run.StepResults)
-	resp, result, input, err := s.runStep(ctx, run, step, results, finalModel)
+	providerName := llm.NormalizeProviderName(run.Provider)
+	provider, _, err := s.providers.Resolve(run.Provider)
+	if err != nil {
+		s.fail(ctx, runID, providerName, "", "", err.Error())
+		return
+	}
+
+	resp, result, input, err := s.runStep(ctx, provider, run, step, results, finalModel)
 	if err != nil {
 		provider, model := providerMeta(resp)
 		rawResponse := ""
@@ -246,7 +262,7 @@ func (s *Service) executeStep(runID string, step int, finalModel string) {
 	}
 }
 
-func (s *Service) runStep(ctx context.Context, run db.ExtractionRun, step int, results []pipelineStepResult, finalModel string) (*llm.TextGenerationResponse, pipelineStepResult, json.RawMessage, error) {
+func (s *Service) runStep(ctx context.Context, provider llm.VisionProvider, run db.ExtractionRun, step int, results []pipelineStepResult, finalModel string) (*llm.TextGenerationResponse, pipelineStepResult, json.RawMessage, error) {
 	var (
 		resp *llm.TextGenerationResponse
 		err  error
@@ -269,7 +285,7 @@ func (s *Service) runStep(ctx context.Context, run db.ExtractionRun, step int, r
 		input["image_path"] = image.StoredPath
 		input["mime_type"] = image.MimeType
 		input["prompt"] = prompt
-		resp, err = s.provider.ConvertAssignmentImageToMarkdown(ctx, llm.ConvertAssignmentImageToMarkdownRequest{
+		resp, err = provider.ConvertAssignmentImageToMarkdown(ctx, llm.ConvertAssignmentImageToMarkdownRequest{
 			ImagePath:     s.storage.FullPath(image.StoredPath),
 			MimeType:      image.MimeType,
 			Prompt:        prompt,
@@ -282,7 +298,7 @@ func (s *Service) runStep(ctx context.Context, run db.ExtractionRun, step int, r
 		}
 		prompt := parametersPrompt(markdown)
 		input["prompt"] = prompt
-		resp, err = s.provider.GenerateAssignmentText(ctx, llm.GenerateAssignmentTextRequest{
+		resp, err = provider.GenerateAssignmentText(ctx, llm.GenerateAssignmentTextRequest{
 			Prompt:        prompt,
 			PromptVersion: PromptVersion,
 		})
@@ -294,7 +310,7 @@ func (s *Service) runStep(ctx context.Context, run db.ExtractionRun, step int, r
 		}
 		prompt := variationRulesPrompt(markdown, parameters)
 		input["prompt"] = prompt
-		resp, err = s.provider.GenerateAssignmentText(ctx, llm.GenerateAssignmentTextRequest{
+		resp, err = provider.GenerateAssignmentText(ctx, llm.GenerateAssignmentTextRequest{
 			Prompt:        prompt,
 			PromptVersion: PromptVersion,
 		})
@@ -307,7 +323,7 @@ func (s *Service) runStep(ctx context.Context, run db.ExtractionRun, step int, r
 		}
 		prompt := variantPrompt(markdown, parameters, variationRules)
 		input["prompt"] = prompt
-		resp, err = s.provider.GenerateAssignmentText(ctx, llm.GenerateAssignmentTextRequest{
+		resp, err = provider.GenerateAssignmentText(ctx, llm.GenerateAssignmentTextRequest{
 			Prompt:        prompt,
 			PromptVersion: PromptVersion,
 			Model:         finalModel,
@@ -376,8 +392,16 @@ func keepPipelineResultsBefore(results []pipelineStepResult, step int) []pipelin
 	return kept
 }
 
-func resolveFinalModel(option string) (string, error) {
+func resolveFinalModel(providerName string, option string) (string, error) {
 	selected := strings.ToLower(strings.TrimSpace(option))
+	providerName = llm.NormalizeProviderName(providerName)
+	if providerName != "gigachat" {
+		if selected == "" {
+			return "", nil
+		}
+		return "", ErrInvalidFinalModel
+	}
+
 	switch selected {
 	case "":
 		return "", nil

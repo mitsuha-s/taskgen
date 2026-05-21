@@ -43,7 +43,7 @@ func main() {
 
 	storage := files.NewLocalStorage(cfg.FileStorageDir)
 	authService := auth.NewService(cfg.AuthEmail, cfg.AuthPassword, cfg.CookieSecure())
-	visionProvider := llm.NewProvider(llm.ProviderConfig{
+	visionProviders := llm.NewProviderRegistry(llm.ProviderConfig{
 		Name:              cfg.LLMProvider,
 		GigaChatAuthKey:   cfg.GigaChatAuthKey,
 		GigaChatModel:     cfg.GigaChatModel,
@@ -53,8 +53,12 @@ func main() {
 		GigaChatAPIBase:   cfg.GigaChatAPIBase,
 		GigaChatVerifyTLS: cfg.GigaChatVerifyTLS,
 		GigaChatTimeout:   cfg.GigaChatTimeout,
+		OpenAIAPIKey:      cfg.OpenAIAPIKey,
+		OpenAIModel:       cfg.OpenAIModel,
+		OpenAIAPIBase:     cfg.OpenAIAPIBase,
+		OpenAITimeout:     cfg.OpenAITimeout,
 	})
-	extractionService := extraction.NewService(store, storage, visionProvider, logger)
+	extractionService := extraction.NewService(store, storage, visionProviders, logger)
 	router := httpapi.NewRouter(cfg, store, authService, storage, extractionService, logger)
 
 	server := &http.Server{

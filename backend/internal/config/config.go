@@ -26,6 +26,10 @@ type Config struct {
 	GigaChatAPIBase   string
 	GigaChatVerifyTLS bool
 	GigaChatTimeout   int64
+	OpenAIAPIKey      string
+	OpenAIModel       string
+	OpenAIAPIBase     string
+	OpenAITimeout     int64
 	FrontendDistDir   string
 	MigrationsDir     string
 	CORSAllowedOrigin string
@@ -54,6 +58,10 @@ func Load() Config {
 		GigaChatAPIBase:   gigachatAPIBase(),
 		GigaChatVerifyTLS: envBool("GIGACHAT_VERIFY_TLS", envBool("GIGACHAT_VERIFY_SSL", true)),
 		GigaChatTimeout:   envInt64("GIGACHAT_TIMEOUT", 90),
+		OpenAIAPIKey:      env("OPENAI_API_KEY", ""),
+		OpenAIModel:       env("OPENAI_MODEL", "gpt-4.1-mini"),
+		OpenAIAPIBase:     strings.TrimRight(env("OPENAI_API_BASE_URL", "https://api.openai.com/v1"), "/"),
+		OpenAITimeout:     envInt64("OPENAI_TIMEOUT", 90),
 		FrontendDistDir:   env("FRONTEND_DIST_DIR", "../frontend/dist"),
 		MigrationsDir:     env("MIGRATIONS_DIR", "migrations"),
 		CORSAllowedOrigin: env("CORS_ALLOWED_ORIGIN", "http://localhost:5173"),
