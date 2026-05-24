@@ -64,4 +64,7 @@ class Config:
 
     @property
     def COOKIE_SECURE(self) -> bool:
+        cookie_secure = os.getenv("COOKIE_SECURE")
+        if cookie_secure is not None:
+            return cookie_secure.lower() in {"1", "true", "yes"}
         return self.APP_ENV != "local"

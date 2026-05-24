@@ -7,9 +7,8 @@
 - `variantor-be/` - Flask API, миграции БД, prompt pipeline и LLM-провайдеры.
 - `variantor-fe/` - React/Vite frontend, в Docker отдается через nginx.
 - `docker-compose.yml` - локальная full-stack среда из корня репозитория.
-- `deploy/docker-compose.prod.yml` - production Compose для GitHub Actions.
-- `.github/workflows/ci.yml` - проверки backend, frontend и Docker Compose.
-- `.github/workflows/deploy.yml` - публикация образов в GHCR и деплой по SSH.
+- `deploy/docker-compose.server.yml` - production Compose для сборки и запуска на сервере.
+- `deploy/post-receive.server` - Git hook для деплоя push'ем в bare repository.
 
 ## Локальный запуск в Docker
 
@@ -67,40 +66,17 @@ npm run dev:backend
 
 Vite проксирует `/api` на `http://127.0.0.1:5000`, поэтому при раздельной разработке backend должен быть доступен на порту `5000`.
 
-## Деплой через GitHub Actions
+## Деплой push'ем на сервер
 
-Workflow `Deploy` собирает и публикует два Docker-образа в GHCR:
+На сервере используется bare repository `/opt/variantor.git` и рабочая копия `/opt/variantor`.
+Push в remote `server` запускает hook `deploy/post-receive.server`, который делает checkout,
+собирает Docker-образы из исходников и выполняет `docker compose up -d --build --remove-orphans`.
 
-- `ghcr.io/<owner>/<repo>/backend:<sha>`
-- `ghcr.io/<owner>/<repo>/frontend:<sha>`
+```bash
+git remote add server root@217.199.254.88:/opt/variantor.git
+git push server master
+```
 
-После этого workflow копирует `deploy/docker-compose.prod.yml` на сервер и выполняет `docker compose pull && docker compose up -d`.
-
-Обязательные GitHub environment secrets для `production`:
-
-- `DEPLOY_HOST`
-- `DEPLOY_USER`
-- `DEPLOY_SSH_KEY`
-- `POSTGRES_PASSWORD`
-- `AUTH_PASSWORD`
-
-Опциональные secrets:
-
-- `GIGACHAT_AUTH_KEY`
-- `GHCR_TOKEN` - нужен только если сервер скачивает приватные GHCR-образы.
-
-Полезные GitHub environment variables:
-
-- `DEPLOY_PATH` - default `/opt/variantor`
-- `DEPLOY_PORT` - default `22`
-- `APP_PORT` - default `18080`
-- `APP_ENV` - default `production`
-- `CORS_ALLOWED_ORIGIN` - публичный origin frontend, например `https://variantor.example.com`
-- `POSTGRES_DB` - default `variantor`
-- `POSTGRES_USER` - default `app`
-- `AUTH_EMAIL` - default `teacher@example.com`
-- `LLM_PROVIDER` - default `mock`
-- `GIGACHAT_MODEL`
-- `GIGACHAT_TEXT_MODEL`
-
+Секреты и runtime-настройки лежат только на сервере в `/opt/variantor/.env`.
+Для GigaChat должны быть заданы `LLM_PROVIDER=gigachat` и `GIGACHAT_AUTH_KEY`.
 На сервере нужен Docker с Compose plugin.

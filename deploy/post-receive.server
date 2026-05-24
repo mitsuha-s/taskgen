@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+BRANCH="${DEPLOY_BRANCH:-master}"
+DEPLOY_ROOT="${DEPLOY_ROOT:-/opt/variantor}"
+BARE_REPO="${BARE_REPO:-/opt/variantor.git}"
+ENV_FILE="${ENV_FILE:-$DEPLOY_ROOT/.env}"
+COMPOSE_FILE="${COMPOSE_FILE:-$DEPLOY_ROOT/deploy/docker-compose.server.yml}"
+PROJECT_NAME="${COMPOSE_PROJECT_NAME:-variantor}"
+LOG_FILE="${LOG_FILE:-/var/log/variantor-deploy.log}"
+
+deploy_revision() {
+  local revision="$1"
+
+  mkdir -p "$DEPLOY_ROOT"
+  git --git-dir="$BARE_REPO" --work-tree="$DEPLOY_ROOT" checkout -f "$revision"
+  git --git-dir="$BARE_REPO" --work-tree="$DEPLOY_ROOT" clean -fd -e .env
+
+  if [ ! -f "$ENV_FILE" ]; then
+    echo "Missing deploy env file: $ENV_FILE" >&2
+    exit 1
+  fi
+
+  docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" -p "$PROJECT_NAME" up -d --build --remove-orphans
+  docker image prune -f
+  docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" -p "$PROJECT_NAME" ps
+}
+
+while read -r oldrev newrev refname; do
+  if [ "$refname" != "refs/heads/$BRANCH" ]; then
+    echo "Skipping $refname; deploy branch is $BRANCH."
+    continue
+  fi
+
+  {
+    echo "=== $(date -Is) deploying $newrev ==="
+    deploy_revision "$newrev"
+    echo "=== $(date -Is) deployment finished ==="
+  } 2>&1 | tee -a "$LOG_FILE"
+done

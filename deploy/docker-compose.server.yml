@@ -1,0 +1,78 @@
+name: ${COMPOSE_PROJECT_NAME:-variantor}
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-variantor}
+      POSTGRES_USER: ${POSTGRES_USER:-app}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-app} -d ${POSTGRES_DB:-variantor}"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+
+  backend:
+    build:
+      context: ../variantor-be
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      APP_ENV: ${APP_ENV:-production}
+      COOKIE_SECURE: ${COOKIE_SECURE:-true}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-variantor}
+      AUTH_EMAIL: ${AUTH_EMAIL:-teacher@example.com}
+      AUTH_PASSWORD: ${AUTH_PASSWORD:?AUTH_PASSWORD is required}
+      FILE_STORAGE_DIR: /app/storage/uploads
+      PUBLIC_FILE_BASE_URL: ${PUBLIC_FILE_BASE_URL:-/api/files}
+      MIGRATIONS_DIR: /app/migrations
+      PROMPTS_DIR: /app/prompts/task_processing_pipeline_v1
+      CORS_ALLOWED_ORIGIN: ${CORS_ALLOWED_ORIGIN:-http://localhost}
+      LLM_PROVIDER: ${LLM_PROVIDER:-gigachat}
+      GIGACHAT_AUTH_KEY: ${GIGACHAT_AUTH_KEY:?GIGACHAT_AUTH_KEY is required}
+      GIGACHAT_MODEL: ${GIGACHAT_MODEL:-GigaChat-Pro}
+      GIGACHAT_TEXT_MODEL: ${GIGACHAT_TEXT_MODEL:-}
+      GIGACHAT_SCOPE: ${GIGACHAT_SCOPE:-GIGACHAT_API_PERS}
+      GIGACHAT_AUTH_URL: ${GIGACHAT_AUTH_URL:-https://ngw.devices.sberbank.ru:9443/api/v2/oauth}
+      GIGACHAT_API_BASE_URL: ${GIGACHAT_API_BASE_URL:-https://gigachat.devices.sberbank.ru/api/v1}
+      GIGACHAT_VERIFY_TLS: ${GIGACHAT_VERIFY_TLS:-true}
+      GIGACHAT_TIMEOUT: ${GIGACHAT_TIMEOUT:-90}
+      MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-10485760}
+      MAX_VARIANT_COUNT: ${MAX_VARIANT_COUNT:-10}
+      ALLOWED_UPLOAD_EXTENSIONS: ${ALLOWED_UPLOAD_EXTENSIONS:-.png,.jpg,.jpeg,.webp}
+    volumes:
+      - backend_uploads:/app/storage/uploads
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/healthz', timeout=2)",
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 10s
+
+  frontend:
+    build:
+      context: ../variantor-fe
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "${APP_PORT:-80}:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
+  backend_uploads:
