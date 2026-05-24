@@ -30,7 +30,7 @@ class GigaChatProvider:
         self._expires_at = 0.0
         self.model = config.model or "GigaChat-Pro"
         self.text_model = config.text_model or self.model
-        self.api_base_url = config.api_base_url.rstrip("/")
+        self.api_base_url = normalize_api_base_url(config.api_base_url)
 
     def complete_text(
         self,
@@ -125,3 +125,11 @@ def chat_messages(prompt: str, system_prompt: str | None = None, attachments: li
         user_message["attachments"] = attachments
     messages.append(user_message)
     return messages
+
+
+def normalize_api_base_url(api_base_url: str) -> str:
+    normalized = api_base_url.rstrip("/")
+    for endpoint in ("/chat/completions", "/files"):
+        while normalized.endswith(endpoint):
+            normalized = normalized[: -len(endpoint)]
+    return normalized
