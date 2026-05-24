@@ -1,13 +1,28 @@
-.env
 .DS_Store
-.cache
-.playwright-mcp
-.playwright-console*.txt
-backend/.env
-backend/api
-backend/storage/uploads/*
-!backend/storage/uploads/.gitkeep
-frontend/dist
-frontend/node_modules
-frontend/.vite
-*.log
+
+# Local environment files
+.env
+.env.*
+!.env.example
+!.env.*.example
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Backend runtime data
+variantor-be/storage/
+
+# Node/Vite
+node_modules/
+variantor-fe/node_modules/
+variantor-fe/dist/
+variantor-fe/.playwright-mcp/
+
+# Local reference exports
+variantor-fe/references/

@@ -1,28 +1,26 @@
-name: ${COMPOSE_PROJECT_NAME:-variantor_local}
+name: variantor
 
 services:
   postgres:
     image: postgres:17-alpine
+    restart: unless-stopped
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-variantor}
       POSTGRES_USER: ${POSTGRES_USER:-app}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-app}
-    ports:
-      - "127.0.0.1:${POSTGRES_PORT:-55432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-app} -d ${POSTGRES_DB:-variantor}"]
-      interval: 5s
+      interval: 10s
       timeout: 3s
       retries: 12
 
   backend:
-    build:
-      context: ./variantor-be
-      dockerfile: Dockerfile
+    image: ${BACKEND_IMAGE}
+    restart: unless-stopped
     environment:
-      APP_ENV: local
+      APP_ENV: ${APP_ENV:-production}
       DATABASE_URL: postgresql://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD:-app}@postgres:5432/${POSTGRES_DB:-variantor}
       AUTH_EMAIL: ${AUTH_EMAIL:-teacher@example.com}
       AUTH_PASSWORD: ${AUTH_PASSWORD:-secret}
@@ -30,7 +28,7 @@ services:
       PUBLIC_FILE_BASE_URL: ${PUBLIC_FILE_BASE_URL:-/api/files}
       MIGRATIONS_DIR: /app/migrations
       PROMPTS_DIR: /app/prompts/task_processing_pipeline_v1
-      CORS_ALLOWED_ORIGIN: http://localhost:${APP_PORT:-18080},http://127.0.0.1:${APP_PORT:-18080},http://127.0.0.1:5173,http://localhost:5173
+      CORS_ALLOWED_ORIGIN: ${CORS_ALLOWED_ORIGIN:-http://localhost:18080}
       LLM_PROVIDER: ${LLM_PROVIDER:-mock}
       GIGACHAT_AUTH_KEY: ${GIGACHAT_AUTH_KEY:-}
       GIGACHAT_MODEL: ${GIGACHAT_MODEL:-GigaChat-Pro}
@@ -62,11 +60,10 @@ services:
       start_period: 10s
 
   frontend:
-    build:
-      context: ./variantor-fe
-      dockerfile: Dockerfile
+    image: ${FRONTEND_IMAGE}
+    restart: unless-stopped
     ports:
-      - "127.0.0.1:${APP_PORT:-18080}:80"
+      - "${APP_PORT:-18080}:80"
     depends_on:
       backend:
         condition: service_healthy

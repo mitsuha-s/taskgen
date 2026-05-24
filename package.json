@@ -1,0 +1,17 @@
+{
+  "name": "variantor",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Variantor monorepo",
+  "scripts": {
+    "dev": "docker compose up --build",
+    "dev:backend": "cd variantor-be && python3 -m flask --app wsgi run --host 127.0.0.1 --port 5000",
+    "dev:frontend": "npm --prefix variantor-fe run dev",
+    "build": "npm --prefix variantor-fe run build",
+    "build:frontend": "npm --prefix variantor-fe run build",
+    "lint": "npm --prefix variantor-fe run lint",
+    "lint:frontend": "npm --prefix variantor-fe run lint",
+    "check:backend": "cd variantor-be && python3 -m compileall app wsgi.py",
+    "compose:config": "docker compose config"
+  }
+}
