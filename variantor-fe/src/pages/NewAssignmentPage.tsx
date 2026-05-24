@@ -1,11 +1,13 @@
 import { zodResolver } from '@hookform/resolvers/zod';
-import { useMutation } from '@tanstack/react-query';
+import { useMutation, useQuery } from '@tanstack/react-query';
 import { FileText, ImagePlus, Loader2, UploadCloud } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { useForm, useWatch } from 'react-hook-form';
 import { useNavigate } from 'react-router-dom';
 import { z } from 'zod';
-import { api, userMessage } from '../lib/api';
+import { LLMSelector } from '../components/LLMSelector';
+import { api, ExtractionOptions, LLMSelection, userMessage } from '../lib/api';
+import { normalizeLLMSelection } from '../lib/llm';
 
 const maxFileSize = 10 * 1024 * 1024;
 const allowedTypes = ['image/jpeg', 'image/png', 'image/webp'];
@@ -36,7 +38,12 @@ type FormValues = z.infer<typeof schema>;
 export default function NewAssignmentPage() {
   const navigate = useNavigate();
   const [submitError, setSubmitError] = useState<string | null>(null);
-  const [stepOneModel, setStepOneModel] = useState<'lite' | 'pro'>('pro');
+  const [stepOneSelection, setStepOneSelection] = useState<LLMSelection>({ provider: '', model: '' });
+
+  const llmOptions = useQuery({
+    queryKey: ['llm-options'],
+    queryFn: api.getLLMOptions,
+  });
 
   const form = useForm<FormValues>({
     resolver: zodResolver(schema),
@@ -52,10 +59,10 @@ export default function NewAssignmentPage() {
       api.uploadImage(assignmentId, file),
   });
   const startExtraction = useMutation({
-    mutationFn: ({ assignmentId, options }: { assignmentId: string; options?: { use_default_source?: boolean; step_model?: 'lite' | 'pro' } }) =>
+    mutationFn: ({ assignmentId, options }: { assignmentId: string; options?: ExtractionOptions }) =>
       api.startExtraction(assignmentId, options),
   });
-  const isSubmitting = createAssignment.isPending || uploadImage.isPending || startExtraction.isPending;
+  const isSubmitting = createAssignment.isPending || uploadImage.isPending || startExtraction.isPending || llmOptions.isLoading;
 
   const watchedFiles = useWatch({ control: form.control, name: 'file' });
   const useDefaultSource = useWatch({ control: form.control, name: 'useDefaultSource' }) ?? false;
@@ -94,7 +101,8 @@ export default function NewAssignmentPage() {
         assignmentId: assignment.id,
         options: {
           use_default_source: useDefaultSource,
-          step_model: stepOneModel,
+          step_provider: normalizeLLMSelection(stepOneSelection, llmOptions.data).provider,
+          step_model: normalizeLLMSelection(stepOneSelection, llmOptions.data).model,
         },
       });
       navigate(`/assignments/${assignment.id}/review?run=${run.extraction_run_id}`);
@@ -169,18 +177,20 @@ export default function NewAssignmentPage() {
               ) : null}
             </div>
             <div className="grid gap-3 sm:grid-cols-2">
-              <label className="space-y-1.5">
-                <span className="label">Модель для шага 1</span>
-                <select className="field" value={stepOneModel} onChange={(event) => setStepOneModel(event.target.value as 'lite' | 'pro')}>
-                  <option value="pro">Pro</option>
-                  <option value="lite">Lite</option>
-                </select>
-              </label>
               <label className="flex items-center gap-2 rounded-md border border-slate-200 bg-[linear-gradient(135deg,#ffffff,#f7f5ff)] px-3 py-2 text-sm text-slate-800">
                 <input type="checkbox" {...form.register('useDefaultSource')} />
                 <span>Использовать дефолтный HTML вместо фото (временно)</span>
               </label>
             </div>
+
+            <LLMSelector
+              options={llmOptions.data}
+              value={normalizeLLMSelection(stepOneSelection, llmOptions.data)}
+              onChange={setStepOneSelection}
+              providerLabel="Провайдер для шага 1"
+              modelLabel="Модель для шага 1"
+              disabled={useDefaultSource}
+            />
 
             {submitError ? <p className="text-sm text-red-700">{submitError}</p> : null}
 

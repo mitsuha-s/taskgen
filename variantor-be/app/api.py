@@ -28,7 +28,7 @@ def auth_service() -> AuthService:
 def require_auth():
     if request.method == "OPTIONS":
         return None
-    if request.endpoint in {"api.login", "api.health"}:
+    if request.endpoint in {"api.login", "api.health", "api.llm_options"}:
         return None
     if not auth_service().is_authenticated(request):
         return jsonify({"error": {"code": "unauthorized", "message": "Authentication is required."}}), 401
@@ -38,6 +38,11 @@ def require_auth():
 @api.get("/health")
 def health():
     return jsonify({"ok": True, "service": "variantor-be"})
+
+
+@api.get("/llm/options")
+def llm_options():
+    return jsonify(service().llm_options())
 
 
 @api.post("/auth/login")
@@ -107,7 +112,8 @@ def update_extraction_step(run_id: str, step: int):
 
 @api.post("/extraction-runs/<run_id>/steps/<int:step>/regenerate")
 def regenerate_extraction_step(run_id: str, step: int):
-    return jsonify(service().regenerate_step(run_id, step)), 202
+    payload = request.get_json(silent=True) or {}
+    return jsonify(service().regenerate_step(run_id, step, payload)), 202
 
 
 @api.get("/files/assignments/<assignment_id>/original")

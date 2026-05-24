@@ -32,6 +32,11 @@ services:
       PROMPTS_DIR: /app/prompts/task_processing_pipeline_v1
       CORS_ALLOWED_ORIGIN: http://localhost:${APP_PORT:-18080},http://127.0.0.1:${APP_PORT:-18080},http://127.0.0.1:5173,http://localhost:5173
       LLM_PROVIDER: ${LLM_PROVIDER:-mock}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-5.5}
+      OPENAI_TEXT_MODEL: ${OPENAI_TEXT_MODEL:-}
+      OPENAI_API_BASE_URL: ${OPENAI_API_BASE_URL:-https://api.openai.com/v1}
+      OPENAI_TIMEOUT: ${OPENAI_TIMEOUT:-90}
       MAX_UPLOAD_BYTES: "10485760"
     volumes:
       - backend_uploads:/app/storage/uploads

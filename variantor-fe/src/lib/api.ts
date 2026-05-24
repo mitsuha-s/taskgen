@@ -64,6 +64,40 @@ export type WarningEntry = {
   message: string;
 };
 
+export type LLMSelection = {
+  provider: string;
+  model: string;
+};
+
+export type LLMModelOption = {
+  id: string;
+  label: string;
+};
+
+export type LLMProviderOption = {
+  id: string;
+  label: string;
+  configured: boolean;
+  default_model: string;
+  models: LLMModelOption[];
+};
+
+export type LLMOptions = {
+  default_provider: string;
+  providers: LLMProviderOption[];
+};
+
+export type ExtractionOptions = {
+  use_default_source?: boolean;
+  step_provider?: string;
+  step_model?: string;
+  final_provider?: string;
+  final_model?: string;
+  evaluation_provider?: string;
+  evaluation_model?: string;
+  variant_count?: number;
+};
+
 export class APIError extends Error {
   code: string;
   status: number;
@@ -118,6 +152,7 @@ export const api = {
     }),
   logout: () => request<{ ok: boolean }>('/api/auth/logout', { method: 'POST' }),
   me: () => request<{ user: User }>('/api/me'),
+  getLLMOptions: () => request<LLMOptions>('/api/llm/options'),
   createAssignment: (title: string) =>
     request<Assignment>('/api/assignments', {
       method: 'POST',
@@ -134,7 +169,7 @@ export const api = {
       },
     );
   },
-  startExtraction: (assignmentId: string, options?: { use_default_source?: boolean; step_model?: 'lite' | 'pro' }) =>
+  startExtraction: (assignmentId: string, options?: ExtractionOptions) =>
     request<{ extraction_run_id: string; status: string }>(
       `/api/assignments/${assignmentId}/extract`,
       { method: 'POST', body: JSON.stringify(options ?? {}) },
@@ -143,7 +178,7 @@ export const api = {
     request<Assignment>(`/api/assignments/${assignmentId}`),
   getExtractionRun: (runId: string) =>
     request<ExtractionRun>(`/api/extraction-runs/${runId}`),
-  continueExtractionRun: (runId: string, options?: { final_model?: 'lite' | 'pro'; variant_count?: number; step_model?: 'lite' | 'pro' }) =>
+  continueExtractionRun: (runId: string, options?: ExtractionOptions) =>
     request<{ extraction_run_id: string; status: string; next_step: number }>(
       `/api/extraction-runs/${runId}/continue`,
       {
@@ -156,10 +191,10 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify({ content }),
     }),
-  regenerateExtractionStep: (runId: string, step: number) =>
+  regenerateExtractionStep: (runId: string, step: number, options?: ExtractionOptions) =>
     request<{ extraction_run_id: string; status: string; step: number }>(
       `/api/extraction-runs/${runId}/steps/${step}/regenerate`,
-      { method: 'POST' },
+      { method: 'POST', body: JSON.stringify(options ?? {}) },
     ),
 };
 

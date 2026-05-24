@@ -61,6 +61,11 @@ class Config:
         "yes",
     }
     GIGACHAT_TIMEOUT = int(os.getenv("GIGACHAT_TIMEOUT", "90"))
+    OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+    OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.5")
+    OPENAI_TEXT_MODEL = os.getenv("OPENAI_TEXT_MODEL", "")
+    OPENAI_API_BASE_URL = os.getenv("OPENAI_API_BASE_URL", "https://api.openai.com/v1")
+    OPENAI_TIMEOUT = int(os.getenv("OPENAI_TIMEOUT", "90"))
 
     @property
     def COOKIE_SECURE(self) -> bool:

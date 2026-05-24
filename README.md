@@ -79,4 +79,5 @@ git push server master
 
 Секреты и runtime-настройки лежат только на сервере в `/opt/variantor/.env`.
 Для GigaChat должны быть заданы `LLM_PROVIDER=gigachat` и `GIGACHAT_AUTH_KEY`.
+Для OpenAI добавьте `OPENAI_API_KEY`; после этого в интерфейсе можно выбирать провайдера и модель для каждого шага пайплайна.
 На сервере нужен Docker с Compose plugin.

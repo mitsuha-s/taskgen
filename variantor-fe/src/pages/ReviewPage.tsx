@@ -2,7 +2,9 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { AlertCircle, ArrowRight, CheckCircle2, Download, FileText, Loader2, RotateCcw, Save } from 'lucide-react';
 import { useRef, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { api, PipelineStepResult, userMessage } from '../lib/api';
+import { LLMSelector } from '../components/LLMSelector';
+import { api, ExtractionOptions, LLMOptions, LLMSelection, PipelineStepResult, userMessage } from '../lib/api';
+import { defaultLLMSelection, normalizeLLMSelection } from '../lib/llm';
 
 const totalSteps = 4;
 
@@ -12,12 +14,13 @@ export default function ReviewPage() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const runId = searchParams.get('run');
-  const [stepModels, setStepModels] = useState<Record<number, 'lite' | 'pro'>>({
-    1: 'pro',
-    2: 'pro',
-    3: 'pro',
-  });
+  const [stepSelections, setStepSelections] = useState<Record<number, LLMSelection>>({});
   const [variantCount, setVariantCount] = useState(3);
+
+  const llmOptions = useQuery({
+    queryKey: ['llm-options'],
+    queryFn: api.getLLMOptions,
+  });
 
   const assignment = useQuery({
     queryKey: ['assignment', id],
@@ -43,7 +46,7 @@ export default function ReviewPage() {
   });
 
   const continueRun = useMutation({
-    mutationFn: (options?: { final_model?: 'lite' | 'pro'; variant_count?: number; step_model?: 'lite' | 'pro' }) =>
+    mutationFn: (options?: ExtractionOptions) =>
       api.continueExtractionRun(runId!, options),
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ['extraction-run', runId] });
@@ -57,7 +60,8 @@ export default function ReviewPage() {
     },
   });
   const regenerateStep = useMutation({
-    mutationFn: (step: number) => api.regenerateExtractionStep(runId!, step),
+    mutationFn: ({ step, options }: { step: number; options?: ExtractionOptions }) =>
+      api.regenerateExtractionStep(runId!, step, options),
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ['extraction-run', runId] });
     },
@@ -72,6 +76,30 @@ export default function ReviewPage() {
   const isRunning = data?.status === 'pending' || data?.status === 'running' || run.isLoading;
   const canContinue = data?.status === 'awaiting_confirmation' && data.current_step < totalSteps;
   const imageURL = assignment.data?.image?.url;
+  const defaultSelection = defaultLLMSelection(llmOptions.data);
+  const selectionForStep = (step: number) => normalizeLLMSelection(stepSelections[step] ?? defaultSelection, llmOptions.data);
+  const updateStepSelection = (step: number, selection: LLMSelection) =>
+    setStepSelections((current) => ({ ...current, [step]: normalizeLLMSelection(selection, llmOptions.data) }));
+  const stepOptions = (step: number): ExtractionOptions => {
+    const selection = selectionForStep(step);
+    return {
+      step_provider: selection.provider,
+      step_model: selection.model,
+    };
+  };
+  const generationOptions = (): ExtractionOptions => {
+    const generationSelection = selectionForStep(3);
+    const evaluationSelection = selectionForStep(4);
+    return {
+      step_provider: generationSelection.provider,
+      step_model: generationSelection.model,
+      final_provider: generationSelection.provider,
+      final_model: generationSelection.model,
+      evaluation_provider: evaluationSelection.provider,
+      evaluation_model: evaluationSelection.model,
+      variant_count: variantCount,
+    };
+  };
 
   if (!id || !runId) {
     return (
@@ -132,21 +160,22 @@ export default function ReviewPage() {
                 steps={steps}
                 currentStep={data?.current_step ?? 1}
                 canEdit={data?.status === 'awaiting_confirmation' || data?.status === 'succeeded'}
-                processing={updateStep.isPending || continueRun.isPending || regenerateStep.isPending}
+                processing={updateStep.isPending || continueRun.isPending || regenerateStep.isPending || llmOptions.isLoading}
                 onSave={(step, content) => updateStep.mutateAsync({ step, content })}
                 onSaveAndContinue={async (step, content) => {
                   await updateStep.mutateAsync({ step, content });
                   const nextStep = step + 1;
                   await continueRun.mutateAsync({
-                    step_model: stepModels[nextStep] ?? 'pro',
-                    ...(nextStep === 3 ? { final_model: stepModels[3] ?? 'pro', variant_count: variantCount } : {}),
+                    ...(nextStep === 3 ? generationOptions() : stepOptions(nextStep)),
                   });
                 }}
-                stepModels={stepModels}
-                onStepModelChange={(step, model) => setStepModels((current) => ({ ...current, [step]: model }))}
+                llmOptions={llmOptions.data}
+                stepSelections={stepSelections}
+                defaultSelection={defaultSelection}
+                onStepSelectionChange={updateStepSelection}
                 variantCount={variantCount}
                 onVariantCountChange={setVariantCount}
-                onRegenerate={(step) => regenerateStep.mutate(step)}
+                onRegenerate={(step) => regenerateStep.mutate({ step, options: step === 3 ? generationOptions() : stepOptions(step) })}
               />
             ) : null}
             {isRunning ? <RunningState step={data?.current_step ?? 1} /> : null}
@@ -160,17 +189,15 @@ export default function ReviewPage() {
             {canContinue ? (
               <ContinueState
                 step={data.current_step}
-                nextStepModel={stepModels[(data.current_step ?? 1) + 1] ?? 'pro'}
-                onNextStepModelChange={(value) =>
-                  setStepModels((current) => ({ ...current, [(data.current_step ?? 1) + 1]: value }))
-                }
+                nextStepSelection={selectionForStep((data.current_step ?? 1) + 1)}
+                llmOptions={llmOptions.data}
+                onNextStepSelectionChange={(value) => updateStepSelection((data.current_step ?? 1) + 1, value)}
                 onContinue={() =>
                   continueRun.mutate({
-                    step_model: stepModels[(data.current_step ?? 1) + 1] ?? 'pro',
-                    ...(data.current_step + 1 === 3 ? { final_model: stepModels[3] ?? 'pro', variant_count: variantCount } : {}),
+                    ...(data.current_step + 1 === 3 ? generationOptions() : stepOptions((data.current_step ?? 1) + 1)),
                   })
                 }
-                processing={continueRun.isPending}
+                processing={continueRun.isPending || llmOptions.isLoading}
                 hidden={data.current_step === 2}
               />
             ) : null}
@@ -202,8 +229,10 @@ function PipelineResults({
   processing,
   onSave,
   onSaveAndContinue,
-  stepModels,
-  onStepModelChange,
+  llmOptions,
+  stepSelections,
+  defaultSelection,
+  onStepSelectionChange,
   variantCount,
   onVariantCountChange,
   onRegenerate,
@@ -214,8 +243,10 @@ function PipelineResults({
   processing: boolean;
   onSave: (step: number, content: string) => Promise<unknown>;
   onSaveAndContinue: (step: number, content: string) => Promise<unknown>;
-  stepModels: Record<number, 'lite' | 'pro'>;
-  onStepModelChange: (step: number, value: 'lite' | 'pro') => void;
+  llmOptions?: LLMOptions;
+  stepSelections: Record<number, LLMSelection>;
+  defaultSelection: LLMSelection;
+  onStepSelectionChange: (step: number, value: LLMSelection) => void;
   variantCount: number;
   onVariantCountChange: (value: number) => void;
   onRegenerate: (step: number) => void;
@@ -244,8 +275,11 @@ function PipelineResults({
               <ParameterEditor
                 content={step.content}
                 processing={processing}
-                stepModel={stepModels[3] ?? 'pro'}
-                onStepModelChange={(value) => onStepModelChange(3, value)}
+                llmOptions={llmOptions}
+                generationSelection={normalizeLLMSelection(stepSelections[3] ?? defaultSelection, llmOptions)}
+                evaluationSelection={normalizeLLMSelection(stepSelections[4] ?? defaultSelection, llmOptions)}
+                onGenerationSelectionChange={(value) => onStepSelectionChange(3, value)}
+                onEvaluationSelectionChange={(value) => onStepSelectionChange(4, value)}
                 variantCount={variantCount}
                 onVariantCountChange={onVariantCountChange}
                 onSave={(content) => onSave(step.step, content)}
@@ -341,8 +375,11 @@ function TaskParametersView({ content }: { content: string }) {
 function ParameterEditor({
   content,
   processing,
-  stepModel,
-  onStepModelChange,
+  llmOptions,
+  generationSelection,
+  evaluationSelection,
+  onGenerationSelectionChange,
+  onEvaluationSelectionChange,
   variantCount,
   onVariantCountChange,
   onSave,
@@ -350,8 +387,11 @@ function ParameterEditor({
 }: {
   content: string;
   processing: boolean;
-  stepModel: 'lite' | 'pro';
-  onStepModelChange: (value: 'lite' | 'pro') => void;
+  llmOptions?: LLMOptions;
+  generationSelection: LLMSelection;
+  evaluationSelection: LLMSelection;
+  onGenerationSelectionChange: (value: LLMSelection) => void;
+  onEvaluationSelectionChange: (value: LLMSelection) => void;
   variantCount: number;
   onVariantCountChange: (value: number) => void;
   onSave: (content: string) => Promise<unknown>;
@@ -392,14 +432,15 @@ function ParameterEditor({
           placeholder="Например: сохранить количество пунктов и формат вариантов ответов"
         />
       </div>
-      <div className="grid gap-3 sm:grid-cols-2">
-        <div className="space-y-1.5">
-          <label className="label" htmlFor="step3-model">Модель для генерации (шаг 3)</label>
-          <select id="step3-model" className="field" value={stepModel} onChange={(event) => onStepModelChange(event.target.value as 'lite' | 'pro')}>
-            <option value="pro">Pro</option>
-            <option value="lite">Lite</option>
-          </select>
-        </div>
+      <div className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_180px]">
+        <LLMSelector
+          options={llmOptions}
+          value={generationSelection}
+          onChange={onGenerationSelectionChange}
+          providerLabel="Провайдер для шага 3"
+          modelLabel="Модель для шага 3"
+          disabled={processing}
+        />
         <div className="space-y-1.5">
           <label className="label" htmlFor="variant-count">Количество новых вариантов (1-10)</label>
           <select
@@ -414,6 +455,14 @@ function ParameterEditor({
           </select>
         </div>
       </div>
+      <LLMSelector
+        options={llmOptions}
+        value={evaluationSelection}
+        onChange={onEvaluationSelectionChange}
+        providerLabel="Провайдер для самооценки"
+        modelLabel="Модель для самооценки"
+        disabled={processing}
+      />
       <EditorActions processing={processing} onSave={() => onSave(value)} onSaveAndContinue={() => onSaveAndContinue(value)} />
     </div>
   );
@@ -458,15 +507,17 @@ function RunningState({ step }: { step: number }) {
 
 function ContinueState({
   step,
-  nextStepModel,
-  onNextStepModelChange,
+  nextStepSelection,
+  llmOptions,
+  onNextStepSelectionChange,
   onContinue,
   processing,
   hidden,
 }: {
   step: number;
-  nextStepModel: 'lite' | 'pro';
-  onNextStepModelChange: (value: 'lite' | 'pro') => void;
+  nextStepSelection: LLMSelection;
+  llmOptions?: LLMOptions;
+  onNextStepSelectionChange: (value: LLMSelection) => void;
   onContinue: () => void;
   processing: boolean;
   hidden?: boolean;
@@ -477,18 +528,14 @@ function ContinueState({
   return (
     <div className="space-y-3 rounded-lg border border-honey/50 bg-[linear-gradient(135deg,#fff7ed,#fffbe8)] p-4 text-sm text-amber-950">
       <div className="font-medium">Шаг {step} завершен. Проверьте промежуточный результат перед продолжением.</div>
-      <div className="space-y-1.5">
-        <label className="label text-amber-900" htmlFor="continue-step-model">Модель для следующего шага</label>
-        <select
-          id="continue-step-model"
-          className="field"
-          value={nextStepModel}
-          onChange={(event) => onNextStepModelChange(event.target.value as 'lite' | 'pro')}
-        >
-          <option value="pro">Pro</option>
-          <option value="lite">Lite</option>
-        </select>
-      </div>
+      <LLMSelector
+        options={llmOptions}
+        value={nextStepSelection}
+        onChange={onNextStepSelectionChange}
+        providerLabel="Провайдер для следующего шага"
+        modelLabel="Модель для следующего шага"
+        disabled={processing}
+      />
       <button className="btn-primary" disabled={processing} onClick={onContinue} type="button">
         {processing ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" /> : <ArrowRight className="h-4 w-4" aria-hidden="true" />}
         Продолжить обработку

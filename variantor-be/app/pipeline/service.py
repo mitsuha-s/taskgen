@@ -21,6 +21,8 @@ GENERATION_STEP = 3
 EVALUATION_STEP = 4
 SCORE_RE = re.compile(r"\b(10|[1-9])\b")
 TAG_RE = re.compile(r"(?is)<[^>]+>")
+SAFE_MODEL_RE = re.compile(r"^[A-Za-z0-9._:-]+$")
+SUPPORTED_PROVIDERS = {"mock", "gigachat", "openai"}
 
 
 @dataclass
@@ -39,12 +41,29 @@ class SavedImage:
     size_bytes: int
 
 
+@dataclass(frozen=True)
+class LLMSelection:
+    provider: str
+    model: str
+
+
 class PipelineService:
     def __init__(self, config: Config):
         self.config = config
         self.prompts = PromptSet(config.PROMPTS_DIR)
-        self.provider = create_provider(config)
+        self._providers: dict[str, Any] = {}
         Path(config.FILE_STORAGE_DIR).mkdir(parents=True, exist_ok=True)
+
+    def llm_options(self) -> dict:
+        return {
+            "default_provider": self.config.LLM_PROVIDER,
+            "providers": provider_options(self.config),
+        }
+
+    def _provider(self, selection: LLMSelection):
+        if selection.provider not in self._providers:
+            self._providers[selection.provider] = create_provider(self.config, selection.provider)
+        return self._providers[selection.provider]
 
     def create_assignment(self, title: str) -> dict:
         with connect() as conn:
@@ -100,7 +119,12 @@ class PipelineService:
         if not use_default_source:
             self._image_by_assignment_id(assignment_id)
 
-        step_model = resolve_model_option(str(options.get("step_model") or ""))
+        step_selection = resolve_llm_selection(
+            options,
+            provider_key="step_provider",
+            model_key="step_model",
+            config=self.config,
+        )
         with connect() as conn:
             run = conn.execute(
                 """
@@ -113,14 +137,14 @@ class PipelineService:
                 """,
                 (
                     assignment_id,
-                    self.provider.name,
-                    getattr(self.provider, "model", "mock"),
+                    step_selection.provider,
+                    step_selection.model,
                     self.prompts.version,
                 ),
             ).fetchone()
             conn.execute("update assignments set status = 'extracting', updated_at = now() where id = %s", (assignment_id,))
 
-        self._background(self.execute_step, str(run["id"]), 1, "", 1, use_default_source, step_model)
+        self._background(self.execute_step, str(run["id"]), 1, step_selection, 1, use_default_source, step_selection)
         return {"extraction_run_id": str(run["id"]), "status": run["status"]}
 
     def get_run(self, run_id: str) -> dict:
@@ -133,11 +157,30 @@ class PipelineService:
             raise PipelineStateError("Pipeline is not waiting for confirmation.", code="pipeline_not_ready")
 
         next_step = int(run["current_step"]) + 1
-        final_model = resolve_model_option(str(options.get("final_model") or ""))
-        step_model = resolve_model_option(str(options.get("step_model") or ""))
+        step_selection = resolve_llm_selection(
+            options,
+            provider_key="step_provider",
+            model_key="step_model",
+            config=self.config,
+        )
+        if next_step == GENERATION_STEP and ("final_provider" in options or "final_model" in options):
+            step_selection = resolve_llm_selection(
+                options,
+                provider_key="final_provider",
+                model_key="final_model",
+                config=self.config,
+                fallback=step_selection,
+            )
+        evaluation_selection = resolve_llm_selection(
+            options,
+            provider_key="evaluation_provider",
+            model_key="evaluation_model",
+            config=self.config,
+            fallback=step_selection,
+        )
         variant_count = resolve_variant_count(options.get("variant_count"))
         self._mark_step_running(run_id, next_step)
-        self._background(self.execute_step, run_id, next_step, final_model, variant_count, False, step_model)
+        self._background(self.execute_step, run_id, next_step, step_selection, variant_count, False, evaluation_selection)
         return {"extraction_run_id": run_id, "status": "running", "next_step": next_step}
 
     def update_step(self, run_id: str, step: int, content: str) -> dict:
@@ -184,7 +227,8 @@ class PipelineService:
         )
         return self.run_payload(updated)
 
-    def regenerate_step(self, run_id: str, step: int) -> dict:
+    def regenerate_step(self, run_id: str, step: int, options: dict[str, Any] | None = None) -> dict:
+        options = options or {}
         if step < 1 or step > TOTAL_PIPELINE_STEPS:
             raise ValidationError("Step is invalid.", code="invalid_step")
         run = self._run_or_404(run_id)
@@ -201,17 +245,30 @@ class PipelineService:
             step_results=results,
             parsed_content=parsed,
         )
-        self._background(self.execute_step, run_id, step, "", 1, False, "")
+        step_selection = resolve_llm_selection(
+            options,
+            provider_key="step_provider",
+            model_key="step_model",
+            config=self.config,
+        )
+        evaluation_selection = resolve_llm_selection(
+            options,
+            provider_key="evaluation_provider",
+            model_key="evaluation_model",
+            config=self.config,
+            fallback=step_selection,
+        )
+        self._background(self.execute_step, run_id, step, step_selection, 1, False, evaluation_selection)
         return {"extraction_run_id": run_id, "status": "running", "step": step}
 
     def execute_step(
         self,
         run_id: str,
         step: int,
-        final_model: str,
+        selection: LLMSelection,
         variant_count: int,
         use_default_source: bool,
-        step_model: str,
+        evaluation_selection: LLMSelection,
     ) -> None:
         try:
             run = self._run_or_404(run_id)
@@ -221,10 +278,9 @@ class PipelineService:
                 run,
                 step,
                 results,
-                final_model,
+                selection,
                 variant_count,
                 use_default_source,
-                step_model,
             )
 
             evaluation_result = None
@@ -236,9 +292,9 @@ class PipelineService:
                     result,
                     variants,
                     llm_input,
-                    final_model,
+                    selection,
                     variant_count,
-                    step_model,
+                    evaluation_selection,
                 )
 
             results.append(result)
@@ -281,25 +337,24 @@ class PipelineService:
                 parsed_content=parsed,
             )
         except Exception as exc:
-            provider = self.provider.name
-            model = getattr(self.provider, "model", "")
-            self._fail_run(run_id, provider, model, "", str(exc))
+            self._fail_run(run_id, selection.provider, selection.model, "", str(exc))
 
     def _run_step(
         self,
         run: dict,
         step: int,
         results: list[dict],
-        final_model: str,
+        selection: LLMSelection,
         variant_count: int,
         use_default_source: bool,
-        step_model: str,
     ) -> tuple[LLMResponse, dict, list[str], dict]:
         llm_input: dict[str, Any] = {
             "assignment_id": str(run["assignment_id"]),
             "run_id": str(run["id"]),
             "step": step,
             "prompt_version": self.prompts.version,
+            "provider": selection.provider,
+            "model": selection.model,
         }
         if step == 1:
             if use_default_source:
@@ -311,19 +366,21 @@ class PipelineService:
                     [],
                     llm_input,
                 )
+            provider = self._provider(selection)
             image = self._image_by_assignment_id(str(run["assignment_id"]))
             prompt = self.prompts.html_from_image_prompt()
             llm_input.update({"image_path": image["stored_path"], "mime_type": image["mime_type"], "prompt": prompt})
-            response = self.provider.complete_with_file(
+            response = provider.complete_with_file(
                 prompt,
                 file_path=str(Path(self.config.FILE_STORAGE_DIR) / image["stored_path"]),
                 mime_type=image["mime_type"],
-                model=step_model or None,
+                model=selection.model or None,
             )
             content = normalize_llm_text(response.content)
             return response, step_result(1, "source_html", pipeline_step_title(1), content), [], llm_input
 
         if step == 2:
+            provider = self._provider(selection)
             source_html = result_content(results, "source_html")
             if not source_html:
                 raise PipelineStateError("step 1 result is missing")
@@ -333,7 +390,7 @@ class PipelineService:
             last_response: LLMResponse | None = None
             for section in sections:
                 prompt = self.prompts.parameters_prompt(section.html)
-                response = self.provider.complete_text(prompt, model=step_model or None)
+                response = provider.complete_text(prompt, model=selection.model or None)
                 params = parse_task_parameters(normalize_llm_text(response.content))
                 params["task_number"] = section.number
                 params["heading"] = section.heading
@@ -354,11 +411,12 @@ class PipelineService:
                 content=serialized,
                 raw_response=json.dumps(raw_outputs, ensure_ascii=False, indent=2),
                 provider=(last_response.provider if last_response else "unknown"),
-                model=(last_response.model if last_response else step_model),
+                model=(last_response.model if last_response else selection.model),
             )
             return response, step_result(2, "parameters", pipeline_step_title(2), serialized), [], llm_input
 
         if step == 3:
+            provider = self._provider(selection)
             source_html = result_content(results, "source_html")
             parameters = result_content(results, "parameters")
             if not source_html or not parameters:
@@ -368,7 +426,6 @@ class PipelineService:
             tasks = bundle["tasks"]
             if len(tasks) != len(sections):
                 raise PipelineStateError(f"expected {len(sections)} task parameter sets, got {len(tasks)}")
-            model = final_model or step_model or None
             full_variants = []
             raw_outputs = []
             last_response: LLMResponse | None = None
@@ -378,7 +435,7 @@ class PipelineService:
                 for index, section in enumerate(sections):
                     params = tasks[index]
                     prompt = self.prompts.generation_prompt(section.html, params, bundle.get("user_comment", ""))
-                    response = self.provider.complete_text(prompt, model=model)
+                    response = provider.complete_text(prompt, model=selection.model or None)
                     task_html = normalize_llm_text(response.content)
                     if not contains_tag(task_html, "h2"):
                         task_html = ensure_section_heading(section.html, task_html)
@@ -400,7 +457,7 @@ class PipelineService:
                 content=first_variant,
                 raw_response=json.dumps(raw_outputs, ensure_ascii=False, indent=2),
                 provider=(last_response.provider if last_response else "unknown"),
-                model=(last_response.model if last_response else (model or "")),
+                model=(last_response.model if last_response else selection.model),
             )
             llm_input.update(
                 {
@@ -413,13 +470,14 @@ class PipelineService:
             return response, step_result(3, "variant_html", pipeline_step_title(3), first_variant), full_variants, llm_input
 
         if step == 4:
+            provider = self._provider(selection)
             source_html = result_content(results, "source_html")
             variant_html = result_content(results, "variant_html")
             if not source_html or not variant_html:
                 raise PipelineStateError("previous pipeline results are missing")
             prompt = self.prompts.self_evaluation_prompt(source_html, variant_html)
             llm_input["prompt"] = prompt
-            response = self.provider.complete_text(prompt, model=step_model or None)
+            response = provider.complete_text(prompt, model=selection.model or None)
             score = str(extract_score(response.content))
             return response, step_result(4, "self_score", pipeline_step_title(4), score), [], llm_input
 
@@ -433,14 +491,18 @@ class PipelineService:
         result: dict,
         variants: list[str],
         llm_input: dict,
-        final_model: str,
+        selection: LLMSelection,
         variant_count: int,
-        step_model: str,
+        evaluation_selection: LLMSelection,
     ) -> tuple[LLMResponse, dict, list[str], dict, dict | None]:
         source_html = result_content(previous_results, "source_html")
-        evaluation_model = final_model or step_model
         try:
-            eval_response, eval_result, score, eval_input = self._evaluate_variant(run, source_html, result["content"], evaluation_model)
+            eval_response, eval_result, score, eval_input = self._evaluate_variant(
+                run,
+                source_html,
+                result["content"],
+                evaluation_selection,
+            )
             self._insert_llm_run(pipeline_task_type(EVALUATION_STEP), eval_response, eval_input, eval_result, "succeeded")
         except Exception:
             return response, result, variants, llm_input, None
@@ -453,32 +515,40 @@ class PipelineService:
                 run,
                 GENERATION_STEP,
                 previous_results,
-                final_model,
+                selection,
                 variant_count,
                 False,
-                step_model,
             )
             retry_eval_response, retry_eval_result, _, retry_eval_input = self._evaluate_variant(
                 run,
                 source_html,
                 retry_result["content"],
-                evaluation_model,
+                evaluation_selection,
             )
             self._insert_llm_run(pipeline_task_type(EVALUATION_STEP), retry_eval_response, retry_eval_input, retry_eval_result, "succeeded")
             return retry_response, retry_result, retry_variants, retry_input, retry_eval_result
         except Exception:
             return response, result, variants, llm_input, eval_result
 
-    def _evaluate_variant(self, run: dict, source_html: str, variant_html: str, model: str) -> tuple[LLMResponse, dict, int, dict]:
+    def _evaluate_variant(
+        self,
+        run: dict,
+        source_html: str,
+        variant_html: str,
+        selection: LLMSelection,
+    ) -> tuple[LLMResponse, dict, int, dict]:
+        provider = self._provider(selection)
         prompt = self.prompts.self_evaluation_prompt(source_html, variant_html)
         llm_input = {
             "assignment_id": str(run["assignment_id"]),
             "run_id": str(run["id"]),
             "step": EVALUATION_STEP,
             "prompt_version": self.prompts.version,
+            "provider": selection.provider,
+            "model": selection.model,
             "prompt": prompt,
         }
-        response = self.provider.complete_text(prompt, model=model or None)
+        response = provider.complete_text(prompt, model=selection.model or None)
         score = extract_score(response.content)
         return response, step_result(EVALUATION_STEP, "self_score", pipeline_step_title(EVALUATION_STEP), str(score)), score, llm_input
 
@@ -754,15 +824,92 @@ def detect_image(head: bytes) -> tuple[str | None, str]:
     return None, ""
 
 
-def resolve_model_option(option: str) -> str:
-    selected = option.strip().lower()
-    if selected == "":
-        return ""
-    if selected == "pro":
-        return "GigaChat-Pro"
-    if selected == "lite":
-        return "GigaChat-2"
-    raise ValidationError("Model must be lite or pro.", code="invalid_final_model")
+def provider_options(config: Config) -> list[dict]:
+    return [
+        {
+            "id": "mock",
+            "label": "Mock",
+            "configured": True,
+            "default_model": "mock",
+            "models": [{"id": "mock", "label": "Mock"}],
+        },
+        {
+            "id": "gigachat",
+            "label": "GigaChat",
+            "configured": bool(config.GIGACHAT_AUTH_KEY),
+            "default_model": config.GIGACHAT_MODEL or "GigaChat-Pro",
+            "models": [
+                {"id": "GigaChat-Pro", "label": "GigaChat Pro"},
+                {"id": "GigaChat-2", "label": "GigaChat 2"},
+            ],
+        },
+        {
+            "id": "openai",
+            "label": "OpenAI",
+            "configured": bool(config.OPENAI_API_KEY),
+            "default_model": config.OPENAI_MODEL or "gpt-5.5",
+            "models": [
+                {"id": "gpt-5.5", "label": "GPT-5.5"},
+                {"id": "gpt-5.4", "label": "GPT-5.4"},
+                {"id": "gpt-5.4-mini", "label": "GPT-5.4 mini"},
+                {"id": "gpt-5.4-nano", "label": "GPT-5.4 nano"},
+            ],
+        },
+    ]
+
+
+def resolve_llm_selection(
+    options: dict[str, Any],
+    *,
+    provider_key: str,
+    model_key: str,
+    config: Config,
+    fallback: LLMSelection | None = None,
+) -> LLMSelection:
+    fallback_provider = fallback.provider if fallback else config.LLM_PROVIDER
+    provider = str(options.get(provider_key) or fallback_provider or "mock").strip().lower()
+    if provider not in SUPPORTED_PROVIDERS:
+        raise ValidationError("LLM provider is not supported.", code="invalid_llm_provider")
+
+    fallback_model = fallback.model if fallback else default_model_for_provider(provider, config)
+    raw_model = str(options.get(model_key) or "").strip()
+    model = resolve_model_for_provider(raw_model, provider, config, fallback_model)
+    return LLMSelection(provider=provider, model=model)
+
+
+def default_model_for_provider(provider: str, config: Config) -> str:
+    if provider == "gigachat":
+        return config.GIGACHAT_MODEL or "GigaChat-Pro"
+    if provider == "openai":
+        return config.OPENAI_MODEL or "gpt-5.5"
+    return "mock"
+
+
+def resolve_model_for_provider(option: str, provider: str, config: Config, fallback_model: str = "") -> str:
+    selected = option.strip()
+    selected_lower = selected.lower()
+    if selected_lower == "":
+        return fallback_model or default_model_for_provider(provider, config)
+
+    aliases = {
+        "gigachat": {
+            "pro": config.GIGACHAT_MODEL or "GigaChat-Pro",
+            "lite": "GigaChat-2",
+        },
+        "openai": {
+            "pro": config.OPENAI_MODEL or "gpt-5.5",
+            "lite": "gpt-5.4-mini",
+        },
+        "mock": {
+            "pro": "mock",
+            "lite": "mock",
+        },
+    }
+    if selected_lower in aliases.get(provider, {}):
+        return aliases[provider][selected_lower]
+    if SAFE_MODEL_RE.match(selected):
+        return selected
+    raise ValidationError("LLM model is invalid.", code="invalid_llm_model")
 
 
 def resolve_variant_count(value: Any) -> int:

@@ -2,12 +2,14 @@ from app.config import Config
 from app.llm.base import LLMProvider
 from app.llm.gigachat import GigaChatConfig, GigaChatProvider
 from app.llm.mock import MockProvider
+from app.llm.openai_provider import OpenAIConfig, OpenAIProvider
 
 
-def create_provider(config: Config) -> LLMProvider:
-    if config.LLM_PROVIDER == "mock":
+def create_provider(config: Config, provider_name: str | None = None) -> LLMProvider:
+    provider = (provider_name or config.LLM_PROVIDER).strip().lower()
+    if provider == "mock":
         return MockProvider()
-    if config.LLM_PROVIDER == "gigachat":
+    if provider == "gigachat":
         if not config.GIGACHAT_AUTH_KEY:
             raise RuntimeError("GIGACHAT_AUTH_KEY is required when LLM_PROVIDER=gigachat")
         return GigaChatProvider(
@@ -22,4 +24,16 @@ def create_provider(config: Config) -> LLMProvider:
                 timeout=config.GIGACHAT_TIMEOUT,
             )
         )
-    raise RuntimeError(f"Unsupported LLM_PROVIDER: {config.LLM_PROVIDER}")
+    if provider == "openai":
+        if not config.OPENAI_API_KEY:
+            raise RuntimeError("OPENAI_API_KEY is required when provider=openai")
+        return OpenAIProvider(
+            OpenAIConfig(
+                api_key=config.OPENAI_API_KEY,
+                model=config.OPENAI_MODEL,
+                text_model=config.OPENAI_TEXT_MODEL,
+                api_base_url=config.OPENAI_API_BASE_URL,
+                timeout=config.OPENAI_TIMEOUT,
+            )
+        )
+    raise RuntimeError(f"Unsupported LLM provider: {provider}")
