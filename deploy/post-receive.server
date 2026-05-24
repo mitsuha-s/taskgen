@@ -8,6 +8,25 @@ ENV_FILE="${ENV_FILE:-$DEPLOY_ROOT/.env}"
 COMPOSE_FILE="${COMPOSE_FILE:-$DEPLOY_ROOT/deploy/docker-compose.server.yml}"
 PROJECT_NAME="${COMPOSE_PROJECT_NAME:-variantor}"
 LOG_FILE="${LOG_FILE:-/var/log/variantor-deploy.log}"
+SWAP_FILE="${DEPLOY_SWAP_FILE:-/swapfile}"
+SWAP_SIZE="${DEPLOY_SWAP_SIZE:-2G}"
+
+ensure_swap() {
+  if awk '/^SwapTotal:/ { exit ($2 > 0 ? 0 : 1) }' /proc/meminfo; then
+    return
+  fi
+
+  if [ ! -f "$SWAP_FILE" ]; then
+    fallocate -l "$SWAP_SIZE" "$SWAP_FILE"
+    chmod 600 "$SWAP_FILE"
+    mkswap "$SWAP_FILE"
+  fi
+
+  swapon "$SWAP_FILE"
+  if ! grep -qs "^$SWAP_FILE " /etc/fstab; then
+    printf '%s none swap sw 0 0\n' "$SWAP_FILE" >> /etc/fstab
+  fi
+}
 
 deploy_revision() {
   local revision="$1"
@@ -21,6 +40,7 @@ deploy_revision() {
     exit 1
   fi
 
+  ensure_swap
   docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" -p "$PROJECT_NAME" up -d --build --remove-orphans
   docker image prune -f
   docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" -p "$PROJECT_NAME" ps
