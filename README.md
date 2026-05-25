@@ -66,9 +66,9 @@ npm run dev:backend
 
 Vite проксирует `/api` на `http://127.0.0.1:5000`, поэтому при раздельной разработке backend должен быть доступен на порту `5000`.
 
-## Деплой на сервер `217.199.254.88`
+## Деплой на сервер `72.56.81.200`
 
-Приложение публикуется на `http://217.199.254.88/`. Деплой сделан через обычный `git push`
+Приложение публикуется на `http://72.56.81.200/`. Деплой сделан через обычный `git push`
 в отдельный Git remote на сервере. GitHub Actions для этого не нужны.
 
 ### Как это работает
@@ -97,7 +97,7 @@ pwd
 Добавьте remote `server`:
 
 ```bash
-git remote add server root@217.199.254.88:/opt/variantor.git
+git remote add server root@72.56.81.200:/opt/variantor.git
 ```
 
 Если remote уже добавлен, команда выше напишет ошибку. Тогда можно просто проверить:
@@ -109,8 +109,8 @@ git remote -v
 В списке должен быть:
 
 ```text
-server  root@217.199.254.88:/opt/variantor.git (fetch)
-server  root@217.199.254.88:/opt/variantor.git (push)
+server  root@72.56.81.200:/opt/variantor.git (fetch)
+server  root@72.56.81.200:/opt/variantor.git (push)
 ```
 
 ### Обычный деплой
@@ -141,8 +141,8 @@ variantor-postgres-1   Up ... (healthy)
 Проверка с локальной машины:
 
 ```bash
-curl http://217.199.254.88/healthz
-curl http://217.199.254.88/api/health
+curl http://72.56.81.200/healthz
+curl http://72.56.81.200/api/health
 ```
 
 ### Что пушить
@@ -177,7 +177,7 @@ GIGACHAT_AUTH_KEY=...
 Для OpenAI добавьте ключ так, чтобы он не попал в историю shell:
 
 ```bash
-ssh root@217.199.254.88
+ssh root@72.56.81.200
 read -rsp "OPENAI_API_KEY: " key
 printf "\nOPENAI_API_KEY=%s\n" "$key" >> /opt/variantor/.env
 unset key
@@ -187,7 +187,7 @@ docker compose --env-file /opt/variantor/.env -f /opt/variantor/deploy/docker-co
 Проверить доступные LLM-провайдеры:
 
 ```bash
-curl http://217.199.254.88/api/llm/options
+curl http://72.56.81.200/api/llm/options
 ```
 
 У OpenAI должно быть `"configured": true`.
@@ -197,19 +197,19 @@ curl http://217.199.254.88/api/llm/options
 Посмотреть контейнеры:
 
 ```bash
-ssh root@217.199.254.88 'docker ps'
+ssh root@72.56.81.200 'docker ps'
 ```
 
 Посмотреть логи backend:
 
 ```bash
-ssh root@217.199.254.88 'docker logs --tail=100 variantor-backend-1'
+ssh root@72.56.81.200 'docker logs --tail=100 variantor-backend-1'
 ```
 
 Посмотреть лог деплоя:
 
 ```bash
-ssh root@217.199.254.88 'tail -n 120 /var/log/variantor-deploy.log'
+ssh root@72.56.81.200 'tail -n 120 /var/log/variantor-deploy.log'
 ```
 
 На сервере уже настроен swap `/swapfile` на 2 GB. Hook также умеет создать его автоматически, если swap выключен.
