@@ -2,7 +2,7 @@ name: variantor
 
 services:
   postgres:
-    image: postgres:17-alpine
+    image: public.ecr.aws/docker/library/postgres:17-alpine
     restart: unless-stopped
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-variantor}

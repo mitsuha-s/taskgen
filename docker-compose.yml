@@ -2,7 +2,7 @@ name: ${COMPOSE_PROJECT_NAME:-variantor_local}
 
 services:
   postgres:
-    image: postgres:17-alpine
+    image: public.ecr.aws/docker/library/postgres:17-alpine
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-variantor}
       POSTGRES_USER: ${POSTGRES_USER:-app}
