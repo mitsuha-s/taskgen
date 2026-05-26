@@ -5,6 +5,6 @@
     "parameters": "step2_parameters.md",
     "generation": "step3_generate_variant.md",
     "self_evaluation": "step4_self_evaluate.md",
-    "default_source": "default_source.html"
+    "default_source": "default_source.json"
   }
 }

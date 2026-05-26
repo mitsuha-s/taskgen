@@ -17,7 +17,7 @@ class Config:
     MIGRATIONS_DIR = os.getenv("MIGRATIONS_DIR", str(BASE_DIR / "migrations"))
     PROMPTS_DIR = os.getenv(
         "PROMPTS_DIR",
-        str(BASE_DIR / "prompts" / "task_processing_pipeline_v1"),
+        str(BASE_DIR / "prompts" / "task_processing_pipeline_v2"),
     )
     AUTH_EMAIL = os.getenv("AUTH_EMAIL", "teacher@example.com")
     AUTH_PASSWORD = os.getenv("AUTH_PASSWORD", "secret")

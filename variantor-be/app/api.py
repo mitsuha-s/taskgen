@@ -86,6 +86,10 @@ def get_assignment(assignment_id: str):
 def upload_assignment_image(assignment_id: str):
     return jsonify(service().save_assignment_image(assignment_id, request.files.get("file")))
 
+@api.post("/assignments/<assignment_id>/files")
+def upload_assignment_files(assignment_id: str):
+    return jsonify(service().save_assignment_files(assignment_id, request.files.getlist("files")))
+
 
 @api.post("/assignments/<assignment_id>/extract")
 def start_extraction(assignment_id: str):
@@ -116,9 +120,9 @@ def regenerate_extraction_step(run_id: str, step: int):
     return jsonify(service().regenerate_step(run_id, step, payload)), 202
 
 
-@api.get("/files/assignments/<assignment_id>/original")
-def serve_assignment_image(assignment_id: str):
-    image = service()._image_by_assignment_id(assignment_id)
+@api.get("/files/assignment-images/<image_id>")
+def serve_assignment_image(image_id: str):
+    image = service().image_by_id_or_404(image_id)
     path = service().image_full_path(image)
     if not path.exists():
         raise NotFoundError("Assignment image file was not found.", code="image_not_found")

@@ -9,6 +9,7 @@ export type Assignment = {
   status: string;
   created_at: string;
   image: AssignmentImage | null;
+  files?: AssignmentImage[];
   latest_extraction_run: RunSummary | null;
 };
 
@@ -163,6 +164,17 @@ export const api = {
     formData.set('file', file);
     return request<{ assignment_id: string; image: AssignmentImage; status: string }>(
       `/api/assignments/${assignmentId}/image`,
+      {
+        method: 'POST',
+        body: formData,
+      },
+    );
+  },
+  uploadFiles: (assignmentId: string, files: File[]) => {
+    const formData = new FormData();
+    files.forEach((file) => formData.append('files', file));
+    return request<{ assignment_id: string; files: AssignmentImage[]; status: string }>(
+      `/api/assignments/${assignmentId}/files`,
       {
         method: 'POST',
         body: formData,

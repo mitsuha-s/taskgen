@@ -1,8 +1,8 @@
 import { zodResolver } from '@hookform/resolvers/zod';
 import { useMutation, useQuery } from '@tanstack/react-query';
-import { FileText, ImagePlus, Loader2, UploadCloud } from 'lucide-react';
+import { FileText, Loader2, UploadCloud } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
-import { useForm, useWatch } from 'react-hook-form';
+import { useForm } from 'react-hook-form';
 import { useNavigate } from 'react-router-dom';
 import { z } from 'zod';
 import { LLMSelector } from '../components/LLMSelector';
@@ -10,35 +10,25 @@ import { api, ExtractionOptions, LLMSelection, userMessage } from '../lib/api';
 import { normalizeLLMSelection } from '../lib/llm';
 
 const maxFileSize = 10 * 1024 * 1024;
-const allowedTypes = ['image/jpeg', 'image/png', 'image/webp'];
+const allowedExtensions = ['.png', '.jpg', '.jpeg', '.webp', '.pdf', '.doc', '.docx'];
+let uploadItemCounter = 0;
 
 const schema = z.object({
   title: z.string().max(160, 'Название слишком длинное.').optional(),
-  file: z.custom<FileList | undefined>(),
   useDefaultSource: z.boolean().optional(),
-}).superRefine((value, ctx) => {
-  if (value.useDefaultSource === true) {
-    return;
-  }
-  const files = value.file;
-  if (!files || files.length !== 1) {
-    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['file'], message: 'Выберите одно изображение.' });
-    return;
-  }
-  if (!allowedTypes.includes(files[0]?.type)) {
-    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['file'], message: 'Поддерживаются только PNG, JPG и WEBP.' });
-  }
-  if ((files[0]?.size ?? 0) > maxFileSize) {
-    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['file'], message: 'Размер файла должен быть до 10 MB.' });
-  }
 });
 
 type FormValues = z.infer<typeof schema>;
+type UploadItem = { id: string; file: File };
 
 export default function NewAssignmentPage() {
   const navigate = useNavigate();
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [stepOneSelection, setStepOneSelection] = useState<LLMSelection>({ provider: '', model: '' });
+  const [files, setFiles] = useState<UploadItem[]>([]);
+  const [isDragActive, setIsDragActive] = useState(false);
+  const [dragDepth, setDragDepth] = useState(0);
+  const [draggedId, setDraggedId] = useState<string | null>(null);
 
   const llmOptions = useQuery({
     queryKey: ['llm-options'],
@@ -47,60 +37,171 @@ export default function NewAssignmentPage() {
 
   const form = useForm<FormValues>({
     resolver: zodResolver(schema),
-    defaultValues: {
-      title: '',
-      useDefaultSource: false,
-    },
+    defaultValues: { title: '', useDefaultSource: false },
   });
 
   const createAssignment = useMutation({ mutationFn: api.createAssignment });
-  const uploadImage = useMutation({
-    mutationFn: ({ assignmentId, file }: { assignmentId: string; file: File }) =>
-      api.uploadImage(assignmentId, file),
+  const uploadFiles = useMutation({
+    mutationFn: ({ assignmentId, upload }: { assignmentId: string; upload: File[] }) =>
+      api.uploadFiles(assignmentId, upload),
   });
   const startExtraction = useMutation({
     mutationFn: ({ assignmentId, options }: { assignmentId: string; options?: ExtractionOptions }) =>
       api.startExtraction(assignmentId, options),
   });
-  const isSubmitting = createAssignment.isPending || uploadImage.isPending || startExtraction.isPending || llmOptions.isLoading;
 
-  const watchedFiles = useWatch({ control: form.control, name: 'file' });
-  const useDefaultSource = useWatch({ control: form.control, name: 'useDefaultSource' }) ?? false;
-  const selectedFile = watchedFiles?.[0];
-  const selectedFileLabel = useMemo(() => {
-    if (!selectedFile) {
-      return 'Файл не выбран';
-    }
-    const sizeMB = selectedFile.size / 1024 / 1024;
-    return `${selectedFile.name} · ${sizeMB.toFixed(2)} MB`;
-  }, [selectedFile]);
-  const previewURL = useMemo(() => {
-    if (!selectedFile) {
-      return null;
-    }
-    return URL.createObjectURL(selectedFile);
-  }, [selectedFile]);
+  const useDefaultSource = form.watch('useDefaultSource') ?? false;
+  const isSubmitting = createAssignment.isPending || uploadFiles.isPending || startExtraction.isPending || llmOptions.isLoading;
+
+  const previewItems = useMemo(
+    () =>
+      files.map((item) => ({
+        id: item.id,
+        name: item.file.name,
+        isImage: item.file.type.startsWith('image/'),
+        url: item.file.type.startsWith('image/') ? URL.createObjectURL(item.file) : null,
+      })),
+    [files],
+  );
 
   useEffect(() => {
     return () => {
-      if (previewURL) {
-        URL.revokeObjectURL(previewURL);
-      }
+      previewItems.forEach((item) => {
+        if (item.url) {
+          URL.revokeObjectURL(item.url);
+        }
+      });
     };
-  }, [previewURL]);
+  }, [previewItems]);
+
+  useEffect(() => {
+    function onPaste(event: ClipboardEvent) {
+      if (useDefaultSource) {
+        return;
+      }
+      const pasted = Array.from(event.clipboardData?.files ?? []);
+      if (pasted.length > 0) {
+        event.preventDefault();
+        appendFiles(pasted);
+      }
+    }
+    window.addEventListener('paste', onPaste);
+    return () => window.removeEventListener('paste', onPaste);
+  }, [useDefaultSource]);
+
+  useEffect(() => {
+    function hasFiles(event: DragEvent) {
+      return Array.from(event.dataTransfer?.types ?? []).includes('Files');
+    }
+    function onDragEnter(event: DragEvent) {
+      if (!hasFiles(event)) {
+        return;
+      }
+      event.preventDefault();
+      setDragDepth((value) => value + 1);
+      setIsDragActive(true);
+    }
+    function onDragOver(event: DragEvent) {
+      if (!hasFiles(event)) {
+        return;
+      }
+      event.preventDefault();
+      if (event.dataTransfer) {
+        event.dataTransfer.dropEffect = 'copy';
+      }
+    }
+    function onDragLeave(event: DragEvent) {
+      if (!hasFiles(event)) {
+        return;
+      }
+      event.preventDefault();
+      setDragDepth((value) => {
+        const next = Math.max(0, value - 1);
+        if (next === 0) {
+          setIsDragActive(false);
+        }
+        return next;
+      });
+    }
+    function onDrop(event: DragEvent) {
+      if (!hasFiles(event)) {
+        return;
+      }
+      event.preventDefault();
+      setDragDepth(0);
+      setIsDragActive(false);
+      if (useDefaultSource) {
+        return;
+      }
+      appendFiles(Array.from(event.dataTransfer?.files ?? []));
+    }
+
+    window.addEventListener('dragenter', onDragEnter);
+    window.addEventListener('dragover', onDragOver);
+    window.addEventListener('dragleave', onDragLeave);
+    window.addEventListener('drop', onDrop);
+    return () => {
+      window.removeEventListener('dragenter', onDragEnter);
+      window.removeEventListener('dragover', onDragOver);
+      window.removeEventListener('dragleave', onDragLeave);
+      window.removeEventListener('drop', onDrop);
+    };
+  }, [useDefaultSource]);
+
+  function appendFiles(incoming: File[]) {
+    const accepted = incoming.filter((file) => {
+      const dotIndex = file.name.lastIndexOf('.');
+      const ext = dotIndex >= 0 ? file.name.slice(dotIndex).toLowerCase() : '';
+      return allowedExtensions.includes(ext) && file.size <= maxFileSize;
+    });
+    if (accepted.length === 0) {
+      return;
+    }
+    setFiles((current) => [
+      ...current,
+      ...accepted.map((file) => ({ id: createUploadItemId(file), file })),
+    ]);
+    if (submitError) {
+      setSubmitError(null);
+    }
+  }
+
+  function createUploadItemId(file: File) {
+    uploadItemCounter += 1;
+    const randomPart = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${uploadItemCounter}`;
+    return `${randomPart}-${file.name}-${file.size}`;
+  }
+
+  function moveItem(sourceId: string, targetId: string) {
+    setFiles((current) => {
+      const sourceIndex = current.findIndex((item) => item.id === sourceId);
+      const targetIndex = current.findIndex((item) => item.id === targetId);
+      if (sourceIndex < 0 || targetIndex < 0 || sourceIndex === targetIndex) {
+        return current;
+      }
+      const next = [...current];
+      const [moved] = next.splice(sourceIndex, 1);
+      next.splice(targetIndex, 0, moved);
+      return next;
+    });
+  }
 
   async function onSubmit(values: FormValues) {
     setSubmitError(null);
+    const useLocalDefault = values.useDefaultSource === true;
+    if (!useLocalDefault && files.length === 0) {
+      setSubmitError('Добавьте хотя бы один файл.');
+      return;
+    }
     try {
       const assignment = await createAssignment.mutateAsync(values.title ?? '');
-      const useDefaultSource = values.useDefaultSource === true;
-      if (!useDefaultSource && values.file?.[0]) {
-        await uploadImage.mutateAsync({ assignmentId: assignment.id, file: values.file[0] });
+      if (!useLocalDefault) {
+        await uploadFiles.mutateAsync({ assignmentId: assignment.id, upload: files.map((item) => item.file) });
       }
       const run = await startExtraction.mutateAsync({
         assignmentId: assignment.id,
         options: {
-          use_default_source: useDefaultSource,
+          use_default_source: useLocalDefault,
           step_provider: normalizeLLMSelection(stepOneSelection, llmOptions.data).provider,
           step_model: normalizeLLMSelection(stepOneSelection, llmOptions.data).model,
         },
@@ -113,13 +214,18 @@ export default function NewAssignmentPage() {
 
   return (
     <div className="space-y-7">
+      {isDragActive ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/55">
+          <div className="rounded-xl border border-white/30 bg-white/10 px-8 py-6 text-center text-xl font-semibold text-white">
+            Перетащите файлы сюда для их загрузки
+          </div>
+        </div>
+      ) : null}
       <div className="flex flex-col gap-4 rounded-xl bg-[linear-gradient(135deg,#266f85_0%,#5b7cfa_52%,#ff8a7a_100%)] p-6 text-white shadow-[0_22px_60px_rgba(91,124,250,0.22)] lg:flex-row lg:items-end lg:justify-between">
         <div>
           <p className="text-sm font-semibold text-honey">Новый материал</p>
           <h1 className="mt-2 text-3xl font-bold tracking-tight">Создать варианты задания</h1>
-          <p className="mt-2 max-w-2xl text-sm leading-6 text-white/78">
-            Загрузите эталон или включите тестовый HTML, затем проверьте параметры и получите готовые варианты для печати.
-          </p>
+          <p className="mt-2 max-w-2xl text-sm leading-6 text-white/78">Поддерживаются изображения, PDF и DOC/DOCX. Можно вставить Ctrl+V или перетащить файлы.</p>
         </div>
         <div className="flex items-center gap-3 rounded-lg bg-white/12 px-4 py-3 text-sm text-white/86">
           <FileText className="h-5 w-5 text-honey" aria-hidden="true" />
@@ -131,57 +237,65 @@ export default function NewAssignmentPage() {
         <section className="panel p-5 sm:p-6">
           <div className="space-y-5">
             <div className="space-y-1.5">
-              <label className="label" htmlFor="title">
-                Название
-              </label>
-              <input
-                id="title"
-                className="field"
-                placeholder="Например: Unit 3 Grammar Test"
-                {...form.register('title')}
-              />
-              {form.formState.errors.title ? (
-                <p className="text-sm text-red-700">{form.formState.errors.title.message}</p>
-              ) : null}
+              <label className="label" htmlFor="title">Название</label>
+              <input id="title" className="field" placeholder="Например: Unit 3 Grammar Test" {...form.register('title')} />
             </div>
 
             <div className="space-y-2">
               <div className="flex items-center justify-between gap-3">
-                <label className="label" htmlFor="file">
-                  Изображение задания
-                </label>
+                <label className="label" htmlFor="file-input">Файлы задания</label>
                 {useDefaultSource ? <span className="rounded-full bg-[linear-gradient(135deg,#e7e5ff,#dff7ff)] px-3 py-1 text-xs font-semibold text-leaf">Демо HTML</span> : null}
               </div>
-              <label
-                className={`flex min-h-40 flex-col items-center justify-center gap-3 rounded-lg border border-dashed px-4 py-8 text-center transition ${
-                  useDefaultSource
-                    ? 'cursor-not-allowed border-slate-200 bg-[linear-gradient(135deg,#f8fafc,#e7e5ff)] text-slate-400'
-                    : 'cursor-pointer border-slate-300 bg-[linear-gradient(135deg,#ffffff,#f7f5ff)] hover:border-leaf hover:bg-moss/30'
-                }`}
-                htmlFor="file"
-              >
-                <ImagePlus className="h-8 w-8 text-leaf" aria-hidden="true" />
-                <span className="text-sm font-medium text-slate-800">{selectedFileLabel}</span>
-                <span className="text-xs text-slate-500">PNG, JPG, WEBP до 10 MB</span>
+              <label className={`flex min-h-28 flex-col items-center justify-center gap-2 rounded-lg border border-dashed px-4 py-6 text-center transition ${useDefaultSource ? 'cursor-not-allowed border-slate-200 bg-[linear-gradient(135deg,#f8fafc,#e7e5ff)] text-slate-400' : 'cursor-pointer border-slate-300 bg-[linear-gradient(135deg,#ffffff,#f7f5ff)] hover:border-leaf hover:bg-moss/30'}`} htmlFor="file-input">
+                <span className="text-sm font-medium text-slate-800">Нажмите или перетащите файлы</span>
+                <span className="text-xs text-slate-500">PNG, JPG, WEBP, PDF, DOC, DOCX до 10 MB каждый</span>
               </label>
               <input
-                id="file"
+                id="file-input"
                 className="sr-only"
                 type="file"
-                accept="image/png,image/jpeg,image/webp"
+                multiple
                 disabled={useDefaultSource}
-                {...form.register('file')}
+                accept=".png,.jpg,.jpeg,.webp,.pdf,.doc,.docx"
+                onChange={(event) => appendFiles(Array.from(event.target.files ?? []))}
               />
-              {form.formState.errors.file ? (
-                <p className="text-sm text-red-700">{form.formState.errors.file.message}</p>
-              ) : null}
             </div>
-            <div className="grid gap-3 sm:grid-cols-2">
-              <label className="flex items-center gap-2 rounded-md border border-slate-200 bg-[linear-gradient(135deg,#ffffff,#f7f5ff)] px-3 py-2 text-sm text-slate-800">
-                <input type="checkbox" {...form.register('useDefaultSource')} />
-                <span>Использовать дефолтный HTML вместо фото (временно)</span>
-              </label>
+
+            <div className="space-y-2 rounded-lg border border-slate-200/90 bg-white/70 p-3">
+              <div className="text-sm font-semibold text-slate-800">Порядок файлов</div>
+              <div className="space-y-2">
+                {files.map((item, index) => (
+                  <div
+                    key={item.id}
+                    className="flex items-center justify-between rounded-md border border-slate-200 bg-white px-3 py-2 text-sm"
+                    draggable={!useDefaultSource}
+                    onDragStart={() => setDraggedId(item.id)}
+                    onDragOver={(event) => event.preventDefault()}
+                    onDrop={() => {
+                      if (draggedId) {
+                        moveItem(draggedId, item.id);
+                      }
+                      setDraggedId(null);
+                    }}
+                  >
+                    <span>{index + 1}. {item.file.name}</span>
+                    <button
+                      className="text-xs text-red-600"
+                      type="button"
+                      onClick={() => setFiles((current) => current.filter((entry) => entry.id !== item.id))}
+                    >
+                      Удалить
+                    </button>
+                  </div>
+                ))}
+                {files.length === 0 ? <div className="text-sm text-slate-500">Файлы не добавлены.</div> : null}
+              </div>
             </div>
+
+            <label className="flex items-center gap-2 rounded-md border border-slate-200 bg-[linear-gradient(135deg,#ffffff,#f7f5ff)] px-3 py-2 text-sm text-slate-800">
+              <input type="checkbox" {...form.register('useDefaultSource')} />
+              <span>Использовать дефолтный HTML вместо файлов (временно)</span>
+            </label>
 
             <LLMSelector
               options={llmOptions.data}
@@ -195,28 +309,35 @@ export default function NewAssignmentPage() {
             {submitError ? <p className="text-sm text-red-700">{submitError}</p> : null}
 
             <button className="btn-primary w-full sm:w-auto" disabled={isSubmitting} type="submit">
-              {isSubmitting ? (
-                <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
-              ) : (
-                <UploadCloud className="h-4 w-4" aria-hidden="true" />
-              )}
+              {isSubmitting ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" /> : <UploadCloud className="h-4 w-4" aria-hidden="true" />}
               Начать обработку
             </button>
           </div>
         </section>
 
         <aside className="panel overflow-hidden">
-          <div className="section-title">Предпросмотр</div>
-          <div className="flex min-h-[420px] items-center justify-center bg-[linear-gradient(135deg,#fff7ed,#f7f5ff_48%,#e9fbff)] p-4">
-            {previewURL ? (
-              <img
-                className="max-h-[720px] w-full rounded-lg object-contain shadow-sm"
-                src={previewURL}
-                alt="Предпросмотр выбранного задания"
-              />
+          <div className="section-title">Предпросмотр файлов</div>
+          <div className="min-h-[420px] space-y-3 overflow-auto bg-[linear-gradient(135deg,#fff7ed,#f7f5ff_48%,#e9fbff)] p-4">
+            {previewItems.length > 0 ? (
+              previewItems.map((item, index) => (
+                <article key={item.id} className="overflow-hidden rounded-lg border border-slate-200 bg-white/95 shadow-sm">
+                  <div className="border-b border-slate-200 bg-slate-50 px-3 py-2 text-xs font-medium text-slate-600">
+                    {index + 1}. {item.name}
+                  </div>
+                  <div className="flex min-h-28 items-center justify-center p-3">
+                    {item.isImage && item.url ? (
+                      <img className="max-h-[280px] w-full rounded object-contain" src={item.url} alt={`Предпросмотр файла ${index + 1}`} />
+                    ) : (
+                      <div className="text-sm text-slate-500">Предпросмотр для этого формата недоступен.</div>
+                    )}
+                  </div>
+                </article>
+              ))
             ) : (
-              <div className="max-w-xs text-center text-sm leading-6 text-slate-500">
-                {useDefaultSource ? 'Будет использован встроенный HTML-шаблон без загрузки фото.' : 'Изображение появится после выбора файла.'}
+              <div className="flex min-h-[360px] items-center justify-center">
+                <div className="max-w-xs text-center text-sm leading-6 text-slate-500">
+                  {useDefaultSource ? 'Будет использован встроенный HTML-шаблон без загрузки файлов.' : 'Добавьте файлы, и они появятся здесь в заданном порядке.'}
+                </div>
               </div>
             )}
           </div>

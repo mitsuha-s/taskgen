@@ -27,7 +27,7 @@ services:
       FILE_STORAGE_DIR: /app/storage/uploads
       PUBLIC_FILE_BASE_URL: ${PUBLIC_FILE_BASE_URL:-/api/files}
       MIGRATIONS_DIR: /app/migrations
-      PROMPTS_DIR: /app/prompts/task_processing_pipeline_v1
+      PROMPTS_DIR: ${PROMPTS_DIR:-/app/prompts/task_processing_pipeline_v2}
       CORS_ALLOWED_ORIGIN: ${CORS_ALLOWED_ORIGIN:-http://localhost:18080}
       LLM_PROVIDER: ${LLM_PROVIDER:-mock}
       GIGACHAT_AUTH_KEY: ${GIGACHAT_AUTH_KEY:-}

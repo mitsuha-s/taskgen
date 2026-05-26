@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { AlertCircle, ArrowRight, CheckCircle2, Download, FileText, Loader2, RotateCcw, Save } from 'lucide-react';
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { LLMSelector } from '../components/LLMSelector';
 import { api, ExtractionOptions, LLMOptions, LLMSelection, PipelineStepResult, userMessage } from '../lib/api';
@@ -75,7 +75,16 @@ export default function ReviewPage() {
   const selectedVariant = data?.parsed_content?.selected_variant ?? 1;
   const isRunning = data?.status === 'pending' || data?.status === 'running' || run.isLoading;
   const canContinue = data?.status === 'awaiting_confirmation' && data.current_step < totalSteps;
-  const imageURL = assignment.data?.image?.url;
+  const originalImages = (assignment.data?.files ?? []).filter((file) => file.mime_type.startsWith('image/'));
+  const fallbackImageURL = assignment.data?.image?.url;
+  const [activeOriginalImage, setActiveOriginalImage] = useState(0);
+  useEffect(() => {
+    if (activeOriginalImage > originalImages.length - 1) {
+      setActiveOriginalImage(0);
+    }
+  }, [activeOriginalImage, originalImages.length]);
+  const currentImageURL = originalImages[activeOriginalImage]?.url ?? fallbackImageURL ?? '';
+  const hideOriginalImage = (data?.current_step ?? 1) >= 2;
   const defaultSelection = defaultLLMSelection(llmOptions.data);
   const selectionForStep = (step: number) => normalizeLLMSelection(stepSelections[step] ?? defaultSelection, llmOptions.data);
   const updateStepSelection = (step: number, selection: LLMSelection) =>
@@ -138,19 +147,37 @@ export default function ReviewPage() {
         </div>
       )}
 
-      <section className="grid gap-6 xl:grid-cols-[minmax(520px,0.95fr)_minmax(520px,1.05fr)] 2xl:grid-cols-[minmax(640px,0.9fr)_minmax(720px,1.1fr)]">
-        <div className="panel overflow-hidden">
-          <div className="section-title">Оригинальное изображение</div>
-          <div className="flex min-h-[560px] items-center justify-center bg-[linear-gradient(135deg,#fff7ed,#f7f5ff_48%,#e9fbff)] p-4 2xl:min-h-[680px]">
-            {imageURL ? (
-              <a href={imageURL} target="_blank" rel="noreferrer" className="block w-full">
-                <img className="max-h-[780px] w-full rounded-lg object-contain shadow-sm 2xl:max-h-[940px]" src={imageURL} alt="Оригинальное задание" />
-              </a>
-            ) : (
-              <div className="max-w-xs text-center text-sm leading-6 text-slate-500">Изображение не загружено или используется встроенный HTML-шаблон.</div>
-            )}
+      <section className={`grid gap-6 ${hideOriginalImage ? '' : 'xl:grid-cols-[minmax(520px,0.95fr)_minmax(520px,1.05fr)] 2xl:grid-cols-[minmax(640px,0.9fr)_minmax(720px,1.1fr)]'}`}>
+        {!hideOriginalImage ? (
+          <div className="panel overflow-hidden">
+            <div className="section-title">Оригинальное изображение</div>
+            <div className="flex min-h-[560px] items-center justify-center bg-[linear-gradient(135deg,#fff7ed,#f7f5ff_48%,#e9fbff)] p-4 2xl:min-h-[680px]">
+              {currentImageURL ? (
+                <div className="grid w-full gap-3 xl:grid-cols-[120px_minmax(0,1fr)]">
+                  {originalImages.length > 1 ? (
+                    <div className="max-h-[780px] space-y-2 overflow-auto pr-1">
+                      {originalImages.map((image, index) => (
+                        <button
+                          key={image.id}
+                          className={`block w-full overflow-hidden rounded-md border ${index === activeOriginalImage ? 'border-leaf' : 'border-slate-200'}`}
+                          type="button"
+                          onClick={() => setActiveOriginalImage(index)}
+                        >
+                          <img className="h-20 w-full object-cover" src={image.url} alt={`Файл ${index + 1}`} />
+                        </button>
+                      ))}
+                    </div>
+                  ) : null}
+                  <a href={currentImageURL} target="_blank" rel="noreferrer" className="block w-full">
+                    <img className="max-h-[780px] w-full rounded-lg object-contain shadow-sm 2xl:max-h-[940px]" src={currentImageURL} alt="Оригинальное задание" />
+                  </a>
+                </div>
+              ) : (
+                <div className="max-w-xs text-center text-sm leading-6 text-slate-500">Изображение не загружено или используется встроенный HTML-шаблон.</div>
+              )}
+            </div>
           </div>
-        </div>
+        ) : null}
 
         <div className="panel overflow-hidden">
           <div className="section-title">Результаты обработки</div>
@@ -325,6 +352,7 @@ function StepContentView({ step }: { step: PipelineStepResult }) {
 }
 
 const taskTypeOptions = ['*', 'Множественный выбор (Multiple choice)', 'Альтернативный выбор (True/False)', 'Перекрестный выбор (Matching)', 'Упорядочение (Rearrangement)', 'Заполнение пропусков (Completion)', 'Вставка слова в нужной форме / Трансформация (Transformation)', 'Ответ на вопрос (Answering questions)', 'Перевод (Translation)', 'Диалог / Интервью (Dialogue / Interview)', 'Обсуждение (Discussion)', 'Написание письма / эссе (Letter / Essay writing)', 'Имитация / Кроссворд / языковые игры (Crossword / Language games)'];
+const subjectOptions = ['*', 'Английский язык', 'Русский язык', 'Литература', 'Математика', 'Алгебра', 'Геометрия', 'Информатика', 'Физика', 'Химия', 'Биология', 'История', 'Обществознание', 'География', 'Иностранный язык', 'Другое'];
 const classOptions = ['*', ...Array.from({ length: 11 }, (_, index) => String(index + 1))];
 const difficultyOptions = ['*', ...Array.from({ length: 10 }, (_, index) => String(index + 1))];
 
@@ -332,12 +360,14 @@ type TaskParametersItem = {
   task_number: number;
   heading: string;
   task_type: string;
+  subject: string;
   school_class: string;
   difficulty: string;
 };
 
 type ParameterBundle = {
   tasks: TaskParametersItem[];
+  subject?: string;
   user_comment?: string;
 };
 
@@ -355,8 +385,9 @@ function TaskParametersView({ content }: { content: string }) {
       {bundle.tasks.map((task) => (
         <div key={task.task_number} className="rounded-lg border border-slate-200/80 bg-[linear-gradient(135deg,#ffffff,#f8fbff)] p-4">
           <div className="text-sm font-semibold text-slate-900">{task.heading || `Задание ${task.task_number}`}</div>
-          <div className="mt-3 grid gap-2 text-sm text-slate-700 sm:grid-cols-3">
+          <div className="mt-3 grid gap-2 text-sm text-slate-700 sm:grid-cols-4">
             <div><span className="font-medium text-slate-900">Тип:</span> {task.task_type}</div>
+            <div><span className="font-medium text-slate-900">Предмет:</span> {task.subject}</div>
             <div><span className="font-medium text-slate-900">Класс:</span> {task.school_class}</div>
             <div><span className="font-medium text-slate-900">Сложность:</span> {task.difficulty}</div>
           </div>
@@ -399,8 +430,13 @@ function ParameterEditor({
 }) {
   const initial = parseParameters(content);
   const [tasks, setTasks] = useState(initial.tasks);
+  const [subject, setSubject] = useState(initial.subject ?? '*');
   const [comment, setComment] = useState(initial.user_comment ?? '');
-  const value = formatParameters({ tasks, user_comment: comment });
+  const value = formatParameters({
+    tasks: tasks.map((task) => ({ ...task, subject })),
+    subject,
+    user_comment: comment,
+  });
 
   function updateTask(index: number, field: keyof TaskParametersItem, value: string) {
     setTasks((current) => current.map((task, taskIndex) => (
@@ -411,6 +447,7 @@ function ParameterEditor({
   return (
     <div className="space-y-4 p-4">
       <div className="space-y-4">
+        <SelectField label="Предмет" value={normalizeOption(subject, subjectOptions)} options={subjectOptions} onChange={(value) => setSubject(value)} />
         {tasks.map((task, index) => (
           <div key={task.task_number} className="rounded-lg border border-slate-200/80 bg-[linear-gradient(135deg,#ffffff,#f8fbff)] p-4">
             <div className="mb-3 text-sm font-semibold text-slate-900">{task.heading || `Задание ${task.task_number}`}</div>
@@ -730,9 +767,35 @@ function FinalDocumentCard({
 }
 
 function HTMLDocument({ html }: { html: string }) {
+  const rendered = jsonPipelineDocumentToHTML(html) ?? html;
   return (
-    <div className="document-html max-w-none" dangerouslySetInnerHTML={{ __html: html }} />
+    <div className="document-html max-w-none" dangerouslySetInnerHTML={{ __html: rendered }} />
   );
+}
+
+function jsonPipelineDocumentToHTML(value: string) {
+  try {
+    const parsed = JSON.parse(value) as { tasks?: Array<{ title?: string; text?: string }> } | Array<{ title?: string; text?: string }>;
+    const tasks = Array.isArray(parsed) ? parsed : parsed.tasks;
+    if (!Array.isArray(tasks)) {
+      return null;
+    }
+    return tasks.map((task, index) => {
+      const title = task.title?.trim() || `Задание ${index + 1}`;
+      const text = task.text?.trim() || '';
+      return `<section><h2>${escapeHTML(title)}</h2>${text}</section>`;
+    }).join('');
+  } catch {
+    return null;
+  }
+}
+
+function escapeHTML(value: string) {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
 }
 
 function FailedState({ message, onRetry, retrying }: { message: string; onRetry: () => void; retrying: boolean }) {
@@ -771,15 +834,18 @@ function parseParameters(content: string) {
             task_number: task.task_number ?? index + 1,
             heading: task.heading ?? `Задание ${index + 1}`,
             task_type: normalizeTaskType(task.task_type ?? '*'),
+            subject: normalizeSubject(task.subject ?? parsed.subject ?? '*'),
             school_class: normalizeOption(task.school_class ?? '*', classOptions),
             difficulty: normalizeOption(task.difficulty ?? '*', difficultyOptions),
           }))
         : [],
+      subject: normalizeSubject(parsed.subject ?? parsed.tasks?.[0]?.subject ?? '*'),
       user_comment: parsed.user_comment ?? '',
     };
   } catch {
     return {
       tasks: [],
+      subject: '*',
       user_comment: '',
     };
   }
@@ -800,6 +866,10 @@ function normalizeTaskType(value: string) {
     return 'Множественный выбор (Multiple choice)';
   }
   return '*';
+}
+
+function normalizeSubject(value: string) {
+  return normalizeOption(value, subjectOptions);
 }
 
 function formatParameters(values: ParameterBundle) {
