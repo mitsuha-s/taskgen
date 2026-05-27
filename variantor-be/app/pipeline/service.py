@@ -3,11 +3,16 @@ import re
 import threading
 import uuid
 from dataclasses import dataclass
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 
 from docx import Document
 from pypdf import PdfReader
+from reportlab.lib.pagesizes import A4
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+from reportlab.pdfgen import canvas
 from werkzeug.datastructures import FileStorage
 
 from app.config import Config
@@ -25,6 +30,12 @@ SCORE_RE = re.compile(r"\b(10|[1-9])\b")
 TAG_RE = re.compile(r"(?is)<[^>]+>")
 SAFE_MODEL_RE = re.compile(r"^[A-Za-z0-9._:-]+$")
 SUPPORTED_PROVIDERS = {"mock", "gigachat", "openai"}
+PDF_FONT_NAME = "DejaVuSans"
+PDF_FONT_PATHS = (
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/usr/local/share/fonts/DejaVuSans.ttf",
+)
+_pdf_font_registered = False
 
 
 @dataclass
@@ -136,6 +147,24 @@ class PipelineService:
             "status": "image_uploaded",
         }
 
+    def preview_pdf_for_file(self, file: FileStorage | None) -> bytes:
+        if file is None or not file.filename:
+            raise ValidationError("File is required.", code="validation_error")
+        ext = Path(file.filename).suffix.lower()
+        raw = file.read() or b""
+        file.stream.seek(0)
+        if not raw:
+            raise ValidationError("File is empty.", code="validation_error")
+        if ext == ".pdf":
+            return raw
+        if ext == ".docx":
+            text = read_docx_text_from_bytes(raw)
+            return text_to_pdf_bytes(text)
+        if ext == ".doc":
+            text = raw.decode("utf-8", errors="ignore")
+            return text_to_pdf_bytes(text)
+        raise ValidationError("Preview is available only for PDF, DOC and DOCX files.", code="preview_not_supported")
+
     def start_extraction(self, assignment_id: str, options: dict[str, Any] | None = None) -> dict:
         options = options or {}
         self._assignment_or_404(assignment_id)
@@ -240,6 +269,10 @@ class PipelineService:
                 if variant.strip() == content.strip():
                     parsed["selected_variant"] = index + 1
                     break
+            if existing.get("answers_by_variant"):
+                parsed["answers_by_variant"] = existing["answers_by_variant"]
+            if existing.get("answers_all"):
+                parsed["answers_all"] = existing["answers_all"]
 
         updated = self._update_run_results(
             run_id,
@@ -335,6 +368,10 @@ class PipelineService:
                 results.append(evaluation_result)
                 parsed["self_score"] = evaluation_result["content"]
                 parsed["steps"] = results
+            if step == GENERATION_STEP and variants:
+                answers_by_variant, answers_all = self._generate_answers_for_variants(run, variants, evaluation_selection)
+                parsed["answers_by_variant"] = answers_by_variant
+                parsed["answers_all"] = answers_all
 
             self._insert_llm_run(
                 task_type=pipeline_task_type(step),
@@ -597,6 +634,25 @@ class PipelineService:
         response = provider.complete_text(prompt, model=selection.model or None)
         score = extract_score(response.content)
         return response, step_result(EVALUATION_STEP, "self_score", pipeline_step_title(EVALUATION_STEP), str(score)), score, llm_input
+
+    def _generate_answers_for_variants(
+        self,
+        run: dict,
+        variants: list[str],
+        selection: LLMSelection,
+    ) -> tuple[list[str], str]:
+        provider = self._provider(selection)
+        answers_by_variant: list[str] = []
+        for variant in variants:
+            prompt = self.prompts.answer_generation_prompt(variant)
+            response = provider.complete_text(prompt, model=selection.model or None)
+            answers_by_variant.append(normalize_llm_text(response.content))
+
+        all_answers = "\n".join(
+            f"<section><h2>Ответы к варианту {index + 1}</h2>{answers}</section>"
+            for index, answers in enumerate(answers_by_variant)
+        )
+        return answers_by_variant, all_answers
 
     def _assignment_or_404(self, assignment_id: str) -> dict:
         with connect() as conn:
@@ -870,6 +926,7 @@ class PipelineService:
         return {
             "id": str(image["id"]),
             "url": self.assignment_image_url(str(image["id"])),
+            "preview_url": self.assignment_image_preview_url(str(image["id"])),
             "mime_type": image["mime_type"],
             "size_bytes": image["size_bytes"],
         }
@@ -895,6 +952,9 @@ class PipelineService:
     def assignment_image_url(self, image_id: str) -> str:
         return f"{self.config.PUBLIC_FILE_BASE_URL}/assignment-images/{image_id}"
 
+    def assignment_image_preview_url(self, image_id: str) -> str:
+        return f"{self.config.PUBLIC_FILE_BASE_URL}/assignment-images/{image_id}/preview.pdf"
+
     def image_full_path(self, image: dict) -> Path:
         return Path(self.config.FILE_STORAGE_DIR) / image["stored_path"]
 
@@ -904,6 +964,19 @@ class PipelineService:
         if row is None:
             raise NotFoundError("Assignment image was not found.", code="image_not_found")
         return row
+
+    def image_preview_pdf_bytes(self, image: dict) -> bytes:
+        path = self.image_full_path(image)
+        mime_type = str(image.get("mime_type") or "")
+        if mime_type == "application/pdf":
+            return path.read_bytes()
+        if mime_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+            text = read_docx_text(path)
+            return text_to_pdf_bytes(text)
+        if mime_type == "application/msword":
+            text = read_doc_text(path)
+            return text_to_pdf_bytes(text)
+        raise ValidationError("Preview PDF is available only for PDF, DOC and DOCX files.", code="preview_not_supported")
 
 
 def detect_supported_file(filename: str, head: bytes) -> tuple[str | None, str]:
@@ -947,25 +1020,15 @@ def json_from_pdf(file_path: str, index: int) -> str:
 def html_from_doc(file_path: str, index: int) -> str:
     suffix = Path(file_path).suffix.lower()
     if suffix == ".docx":
-        document = Document(file_path)
-        lines = [p.text.strip() for p in document.paragraphs if p.text.strip()]
-        body = "\n\n".join(lines)
-        return text_to_html_document(body, index)
-    with open(file_path, "rb") as f:
-        raw = f.read()
-    body = raw.decode("utf-8", errors="ignore")
-    return text_to_html_document(body, index)
+        return text_to_html_document(read_docx_text(Path(file_path)), index)
+    return text_to_html_document(read_doc_text(Path(file_path)), index)
 
 
 def json_from_doc(file_path: str, index: int) -> str:
     suffix = Path(file_path).suffix.lower()
     if suffix == ".docx":
-        document = Document(file_path)
-        lines = [p.text.strip() for p in document.paragraphs if p.text.strip()]
-        return text_to_json_document("\n\n".join(lines), index)
-    with open(file_path, "rb") as f:
-        raw = f.read()
-    return text_to_json_document(raw.decode("utf-8", errors="ignore"), index)
+        return text_to_json_document(read_docx_text(Path(file_path)), index)
+    return text_to_json_document(read_doc_text(Path(file_path)), index)
 
 
 def text_to_html_document(text: str, index: int) -> str:
@@ -979,6 +1042,61 @@ def text_to_html_document(text: str, index: int) -> str:
         f"{paragraphs}"
         "</body></html>"
     )
+
+def read_docx_text(path: Path) -> str:
+    document = Document(str(path))
+    lines = [p.text.strip() for p in document.paragraphs if p.text.strip()]
+    return "\n\n".join(lines)
+
+def read_docx_text_from_bytes(raw: bytes) -> str:
+    document = Document(BytesIO(raw))
+    lines = [p.text.strip() for p in document.paragraphs if p.text.strip()]
+    return "\n\n".join(lines)
+
+
+def read_doc_text(path: Path) -> str:
+    with path.open("rb") as f:
+        raw = f.read()
+    return raw.decode("utf-8", errors="ignore")
+
+
+def text_to_pdf_bytes(text: str) -> bytes:
+    font_name = pdf_font_name()
+    buffer = BytesIO()
+    pdf = canvas.Canvas(buffer, pagesize=A4)
+    pdf.setFont(font_name, 10)
+    width, height = A4
+    y = height - 40
+    for raw_line in (text.strip() or "Документ пуст.").splitlines():
+        line = raw_line.strip() or " "
+        while len(line) > 110:
+            pdf.drawString(40, y, line[:110])
+            y -= 14
+            line = line[110:]
+            if y < 40:
+                pdf.showPage()
+                pdf.setFont(font_name, 10)
+                y = height - 40
+        pdf.drawString(40, y, line)
+        y -= 14
+        if y < 40:
+            pdf.showPage()
+            pdf.setFont(font_name, 10)
+            y = height - 40
+    pdf.save()
+    return buffer.getvalue()
+
+
+def pdf_font_name() -> str:
+    global _pdf_font_registered
+    if _pdf_font_registered:
+        return PDF_FONT_NAME
+    for font_path in PDF_FONT_PATHS:
+        if Path(font_path).exists():
+            pdfmetrics.registerFont(TTFont(PDF_FONT_NAME, font_path))
+            _pdf_font_registered = True
+            return PDF_FONT_NAME
+    return "Helvetica"
 
 
 def text_to_json_document(text: str, index: int) -> str:
@@ -1079,9 +1197,8 @@ def provider_options(config: Config) -> list[dict]:
             "id": "openai",
             "label": "OpenAI",
             "configured": bool(config.OPENAI_API_KEY),
-            "default_model": config.OPENAI_MODEL or "gpt-5.5",
+            "default_model": config.OPENAI_MODEL or "gpt-5.4",
             "models": [
-                {"id": "gpt-5.5", "label": "GPT-5.5"},
                 {"id": "gpt-5.4", "label": "GPT-5.4"},
                 {"id": "gpt-5.4-mini", "label": "GPT-5.4 mini"},
                 {"id": "gpt-5.4-nano", "label": "GPT-5.4 nano"},
@@ -1113,7 +1230,7 @@ def default_model_for_provider(provider: str, config: Config) -> str:
     if provider == "gigachat":
         return config.GIGACHAT_MODEL or "GigaChat-Pro"
     if provider == "openai":
-        return config.OPENAI_MODEL or "gpt-5.5"
+        return config.OPENAI_MODEL or "gpt-5.4"
     return "mock"
 
 
@@ -1129,7 +1246,7 @@ def resolve_model_for_provider(option: str, provider: str, config: Config, fallb
             "lite": "GigaChat-2",
         },
         "openai": {
-            "pro": config.OPENAI_MODEL or "gpt-5.5",
+            "pro": config.OPENAI_MODEL or "gpt-5.4",
             "lite": "gpt-5.4-mini",
         },
         "mock": {
@@ -1183,6 +1300,8 @@ def build_pipeline_content(results: list[dict]) -> dict:
         "source_html": result_content(results, "source_html"),
         "parameters": result_content(results, "parameters"),
         "variant_html": result_content(results, "variant_html"),
+        "answers_by_variant": [],
+        "answers_all": "",
         "self_score": result_content(results, "self_score"),
         "steps": results,
     }

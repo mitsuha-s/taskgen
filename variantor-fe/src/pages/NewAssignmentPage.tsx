@@ -1,7 +1,7 @@
 import { zodResolver } from '@hookform/resolvers/zod';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { FileText, Loader2, UploadCloud } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useForm } from 'react-hook-form';
 import { useNavigate } from 'react-router-dom';
 import { z } from 'zod';
@@ -20,7 +20,6 @@ const schema = z.object({
 
 type FormValues = z.infer<typeof schema>;
 type UploadItem = { id: string; file: File };
-
 export default function NewAssignmentPage() {
   const navigate = useNavigate();
   const [submitError, setSubmitError] = useState<string | null>(null);
@@ -52,27 +51,6 @@ export default function NewAssignmentPage() {
 
   const useDefaultSource = form.watch('useDefaultSource') ?? false;
   const isSubmitting = createAssignment.isPending || uploadFiles.isPending || startExtraction.isPending || llmOptions.isLoading;
-
-  const previewItems = useMemo(
-    () =>
-      files.map((item) => ({
-        id: item.id,
-        name: item.file.name,
-        isImage: item.file.type.startsWith('image/'),
-        url: item.file.type.startsWith('image/') ? URL.createObjectURL(item.file) : null,
-      })),
-    [files],
-  );
-
-  useEffect(() => {
-    return () => {
-      previewItems.forEach((item) => {
-        if (item.url) {
-          URL.revokeObjectURL(item.url);
-        }
-      });
-    };
-  }, [previewItems]);
 
   useEffect(() => {
     function onPaste(event: ClipboardEvent) {
@@ -233,7 +211,7 @@ export default function NewAssignmentPage() {
         </div>
       </div>
 
-      <form className="grid gap-6 xl:grid-cols-[minmax(520px,0.72fr)_minmax(420px,0.55fr)] 2xl:grid-cols-[minmax(640px,0.78fr)_minmax(480px,0.5fr)]" onSubmit={form.handleSubmit(onSubmit)}>
+      <form className="grid gap-6" onSubmit={form.handleSubmit(onSubmit)}>
         <section className="panel p-5 sm:p-6">
           <div className="space-y-5">
             <div className="space-y-1.5">
@@ -315,33 +293,6 @@ export default function NewAssignmentPage() {
           </div>
         </section>
 
-        <aside className="panel overflow-hidden">
-          <div className="section-title">Предпросмотр файлов</div>
-          <div className="min-h-[420px] space-y-3 overflow-auto bg-[linear-gradient(135deg,#fff7ed,#f7f5ff_48%,#e9fbff)] p-4">
-            {previewItems.length > 0 ? (
-              previewItems.map((item, index) => (
-                <article key={item.id} className="overflow-hidden rounded-lg border border-slate-200 bg-white/95 shadow-sm">
-                  <div className="border-b border-slate-200 bg-slate-50 px-3 py-2 text-xs font-medium text-slate-600">
-                    {index + 1}. {item.name}
-                  </div>
-                  <div className="flex min-h-28 items-center justify-center p-3">
-                    {item.isImage && item.url ? (
-                      <img className="max-h-[280px] w-full rounded object-contain" src={item.url} alt={`Предпросмотр файла ${index + 1}`} />
-                    ) : (
-                      <div className="text-sm text-slate-500">Предпросмотр для этого формата недоступен.</div>
-                    )}
-                  </div>
-                </article>
-              ))
-            ) : (
-              <div className="flex min-h-[360px] items-center justify-center">
-                <div className="max-w-xs text-center text-sm leading-6 text-slate-500">
-                  {useDefaultSource ? 'Будет использован встроенный HTML-шаблон без загрузки файлов.' : 'Добавьте файлы, и они появятся здесь в заданном порядке.'}
-                </div>
-              </div>
-            )}
-          </div>
-        </aside>
       </form>
     </div>
   );

@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { AlertCircle, ArrowRight, CheckCircle2, Download, FileText, Loader2, RotateCcw, Save } from 'lucide-react';
-import { useEffect, useRef, useState } from 'react';
+import { useRef, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { LLMSelector } from '../components/LLMSelector';
 import { api, ExtractionOptions, LLMOptions, LLMSelection, PipelineStepResult, userMessage } from '../lib/api';
@@ -72,19 +72,11 @@ export default function ReviewPage() {
   const sourceHTML = data?.parsed_content?.source_html ?? steps.find((step) => step.key === 'source_html')?.content ?? '';
   const finalHTML = data?.parsed_content?.variant_html ?? steps.find((step) => step.key === 'variant_html')?.content ?? '';
   const variantsHTML = data?.parsed_content?.variants_html ?? (finalHTML ? [finalHTML] : []);
+  const variantAnswers = data?.parsed_content?.answers_by_variant ?? [];
+  const allAnswers = data?.parsed_content?.answers_all ?? '';
   const selectedVariant = data?.parsed_content?.selected_variant ?? 1;
   const isRunning = data?.status === 'pending' || data?.status === 'running' || run.isLoading;
   const canContinue = data?.status === 'awaiting_confirmation' && data.current_step < totalSteps;
-  const originalImages = (assignment.data?.files ?? []).filter((file) => file.mime_type.startsWith('image/'));
-  const fallbackImageURL = assignment.data?.image?.url;
-  const [activeOriginalImage, setActiveOriginalImage] = useState(0);
-  useEffect(() => {
-    if (activeOriginalImage > originalImages.length - 1) {
-      setActiveOriginalImage(0);
-    }
-  }, [activeOriginalImage, originalImages.length]);
-  const currentImageURL = originalImages[activeOriginalImage]?.url ?? fallbackImageURL ?? '';
-  const hideOriginalImage = (data?.current_step ?? 1) >= 2;
   const defaultSelection = defaultLLMSelection(llmOptions.data);
   const selectionForStep = (step: number) => normalizeLLMSelection(stepSelections[step] ?? defaultSelection, llmOptions.data);
   const updateStepSelection = (step: number, selection: LLMSelection) =>
@@ -147,38 +139,7 @@ export default function ReviewPage() {
         </div>
       )}
 
-      <section className={`grid gap-6 ${hideOriginalImage ? '' : 'xl:grid-cols-[minmax(520px,0.95fr)_minmax(520px,1.05fr)] 2xl:grid-cols-[minmax(640px,0.9fr)_minmax(720px,1.1fr)]'}`}>
-        {!hideOriginalImage ? (
-          <div className="panel overflow-hidden">
-            <div className="section-title">Оригинальное изображение</div>
-            <div className="flex min-h-[560px] items-center justify-center bg-[linear-gradient(135deg,#fff7ed,#f7f5ff_48%,#e9fbff)] p-4 2xl:min-h-[680px]">
-              {currentImageURL ? (
-                <div className="grid w-full gap-3 xl:grid-cols-[120px_minmax(0,1fr)]">
-                  {originalImages.length > 1 ? (
-                    <div className="max-h-[780px] space-y-2 overflow-auto pr-1">
-                      {originalImages.map((image, index) => (
-                        <button
-                          key={image.id}
-                          className={`block w-full overflow-hidden rounded-md border ${index === activeOriginalImage ? 'border-leaf' : 'border-slate-200'}`}
-                          type="button"
-                          onClick={() => setActiveOriginalImage(index)}
-                        >
-                          <img className="h-20 w-full object-cover" src={image.url} alt={`Файл ${index + 1}`} />
-                        </button>
-                      ))}
-                    </div>
-                  ) : null}
-                  <a href={currentImageURL} target="_blank" rel="noreferrer" className="block w-full">
-                    <img className="max-h-[780px] w-full rounded-lg object-contain shadow-sm 2xl:max-h-[940px]" src={currentImageURL} alt="Оригинальное задание" />
-                  </a>
-                </div>
-              ) : (
-                <div className="max-w-xs text-center text-sm leading-6 text-slate-500">Изображение не загружено или используется встроенный HTML-шаблон.</div>
-              )}
-            </div>
-          </div>
-        ) : null}
-
+      <section className="grid gap-6">
         <div className="panel overflow-hidden">
           <div className="section-title">Результаты обработки</div>
           <div className="space-y-4 p-4 sm:p-5">
@@ -234,6 +195,8 @@ export default function ReviewPage() {
                 <FinalDocumentCard
                   sourceHTML={sourceHTML}
                   variants={variantsHTML}
+                  answersByVariant={variantAnswers}
+                  answersAll={allAnswers}
                   selectedVariant={selectedVariant}
                   onAcceptVariant={async (variant) => {
                     await updateStep.mutateAsync({ step: 3, content: variant });
@@ -595,25 +558,34 @@ function CompletedState() {
 function FinalDocumentCard({
   sourceHTML,
   variants,
+  answersByVariant,
+  answersAll,
   selectedVariant,
   onAcceptVariant,
   title,
 }: {
   sourceHTML: string;
   variants: string[];
+  answersByVariant: string[];
+  answersAll: string;
   selectedVariant: number;
   onAcceptVariant: (variant: string) => Promise<unknown>;
   title: string;
 }) {
   const documentRef = useRef<HTMLDivElement>(null);
   const allVariantsDocumentRef = useRef<HTMLDivElement>(null);
+  const answerDocumentRef = useRef<HTMLDivElement>(null);
+  const allAnswersDocumentRef = useRef<HTMLDivElement>(null);
   const [generating, setGenerating] = useState(false);
   const [generatingAll, setGeneratingAll] = useState(false);
+  const [generatingAnswers, setGeneratingAnswers] = useState(false);
+  const [generatingAllAnswers, setGeneratingAllAnswers] = useState(false);
   const [activeIndex, setActiveIndex] = useState(Math.max(0, selectedVariant - 1));
   const [accepting, setAccepting] = useState(false);
 
   const safeVariants = variants.filter((variant) => variant.trim().length > 0);
   const activeVariant = safeVariants[activeIndex] ?? '';
+  const activeAnswers = answersByVariant[activeIndex] ?? '';
 
   async function downloadPDF() {
     if (!documentRef.current || !activeVariant.trim()) {
@@ -687,6 +659,48 @@ function FinalDocumentCard({
     }
   }
 
+  async function downloadAnswersPDF() {
+    if (!answerDocumentRef.current || !activeAnswers.trim()) {
+      return;
+    }
+    setGeneratingAnswers(true);
+    try {
+      const html2pdf = (await import('html2pdf.js')).default;
+      const pdfOptions: Record<string, unknown> = {
+        margin: [12, 12, 14, 12],
+        filename: `${safeFilename(title)}-variant-${activeIndex + 1}-answers.pdf`,
+        image: { type: 'jpeg', quality: 0.98 },
+        html2canvas: { scale: 2, backgroundColor: '#ffffff', useCORS: true },
+        jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' },
+        pagebreak: { mode: ['css', 'legacy'] },
+      };
+      await html2pdf().set(pdfOptions).from(answerDocumentRef.current).save();
+    } finally {
+      setGeneratingAnswers(false);
+    }
+  }
+
+  async function downloadAllAnswersPDF() {
+    if (!allAnswersDocumentRef.current || !answersAll.trim()) {
+      return;
+    }
+    setGeneratingAllAnswers(true);
+    try {
+      const html2pdf = (await import('html2pdf.js')).default;
+      const pdfOptions: Record<string, unknown> = {
+        margin: [10, 10, 12, 10],
+        filename: `${safeFilename(title)}-all-answers.pdf`,
+        image: { type: 'jpeg', quality: 0.98 },
+        html2canvas: { scale: 2, backgroundColor: '#ffffff', useCORS: true },
+        jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' },
+        pagebreak: { mode: ['css', 'legacy'] },
+      };
+      await html2pdf().set(pdfOptions).from(allAnswersDocumentRef.current).save();
+    } finally {
+      setGeneratingAllAnswers(false);
+    }
+  }
+
   if (!activeVariant.trim()) {
     return null;
   }
@@ -706,6 +720,14 @@ function FinalDocumentCard({
           <button className="btn-secondary" disabled={generatingAll || safeVariants.length === 0} onClick={downloadAllVariantsPDF} type="button">
             {generatingAll ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" /> : <Download className="h-4 w-4" aria-hidden="true" />}
             Скачать все варианты PDF
+          </button>
+          <button className="btn-secondary" disabled={generatingAnswers || !activeAnswers.trim()} onClick={downloadAnswersPDF} type="button">
+            {generatingAnswers ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" /> : <Download className="h-4 w-4" aria-hidden="true" />}
+            Скачать ответы для варианта
+          </button>
+          <button className="btn-secondary" disabled={generatingAllAnswers || !answersAll.trim()} onClick={downloadAllAnswersPDF} type="button">
+            {generatingAllAnswers ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" /> : <Download className="h-4 w-4" aria-hidden="true" />}
+            Скачать ответы на все варианты
           </button>
           <button className="btn-primary" disabled={generating} onClick={downloadPDF} type="button">
             {generating ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" /> : <Download className="h-4 w-4" aria-hidden="true" />}
@@ -760,6 +782,16 @@ function FinalDocumentCard({
               <HTMLDocument html={variant} />
             </section>
           ))}
+        </div>
+        <div ref={answerDocumentRef} className="bg-white px-10 py-9 text-slate-950">
+          <div className="mb-7 border-b border-slate-200 pb-4">
+            <div className="text-xs font-semibold uppercase tracking-wider text-leaf">Ответы</div>
+            <div className="mt-2 text-2xl font-semibold leading-tight text-slate-950">{title} · вариант {activeIndex + 1}</div>
+          </div>
+          <HTMLDocument html={activeAnswers} />
+        </div>
+        <div ref={allAnswersDocumentRef} className="bg-white px-8 py-8 text-slate-950">
+          <HTMLDocument html={answersAll} />
         </div>
       </div>
     </section>

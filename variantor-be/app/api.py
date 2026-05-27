@@ -1,3 +1,5 @@
+from io import BytesIO
+
 from flask import Blueprint, current_app, jsonify, make_response, request, send_file
 
 from app.auth import AuthService, InvalidCredentials
@@ -90,6 +92,16 @@ def upload_assignment_image(assignment_id: str):
 def upload_assignment_files(assignment_id: str):
     return jsonify(service().save_assignment_files(assignment_id, request.files.getlist("files")))
 
+@api.post("/files/preview.pdf")
+def preview_file_pdf():
+    payload = service().preview_pdf_for_file(request.files.get("file"))
+    return send_file(
+        BytesIO(payload),
+        mimetype="application/pdf",
+        as_attachment=False,
+        download_name="preview.pdf",
+    )
+
 
 @api.post("/assignments/<assignment_id>/extract")
 def start_extraction(assignment_id: str):
@@ -127,6 +139,20 @@ def serve_assignment_image(image_id: str):
     if not path.exists():
         raise NotFoundError("Assignment image file was not found.", code="image_not_found")
     return send_file(path, mimetype=image["mime_type"], download_name="original")
+
+@api.get("/files/assignment-images/<image_id>/preview.pdf")
+def serve_assignment_image_preview(image_id: str):
+    image = service().image_by_id_or_404(image_id)
+    path = service().image_full_path(image)
+    if not path.exists():
+        raise NotFoundError("Assignment image file was not found.", code="image_not_found")
+    payload = service().image_preview_pdf_bytes(image)
+    return send_file(
+        BytesIO(payload),
+        mimetype="application/pdf",
+        as_attachment=False,
+        download_name=f"preview-{image_id}.pdf",
+    )
 
 
 def parse_variant_count(_: str | None) -> int:

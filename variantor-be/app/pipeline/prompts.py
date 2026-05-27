@@ -18,6 +18,7 @@ class PromptSet:
         self._parameters = self._read(files["parameters"])
         self._generation = self._read(files["generation"])
         self._self_evaluation = self._read(files["self_evaluation"])
+        self._answer_generation = self._read(files["answer_generation"]) if files.get("answer_generation") else ""
         self.default_source = self._read(files["default_source"])
 
     def html_from_image_prompt(self) -> str:
@@ -52,6 +53,20 @@ class PromptSet:
                 "SourceJson": source_html,
                 "VariantJson": variant_html,
                 "Subject": "*",
+            },
+        )
+
+    def answer_generation_prompt(self, variant_html: str, subject: str = "*") -> str:
+        template = self._answer_generation or (
+            "Реши школьный вариант по предмету {{.Subject}} и верни только ответы по заданиям в HTML."
+            "\n\n<variant>\n{{.VariantHTML}}\n</variant>"
+        )
+        return self._render(
+            template,
+            {
+                "VariantHTML": variant_html,
+                "VariantJson": variant_html,
+                "Subject": subject,
             },
         )
 
