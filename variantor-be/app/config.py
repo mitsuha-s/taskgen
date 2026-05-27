@@ -17,7 +17,7 @@ class Config:
     MIGRATIONS_DIR = os.getenv("MIGRATIONS_DIR", str(BASE_DIR / "migrations"))
     PROMPTS_DIR = os.getenv(
         "PROMPTS_DIR",
-        str(BASE_DIR / "prompts" / "task_processing_pipeline_v1"),
+        str(BASE_DIR / "prompts" / "task_processing_pipeline_v2"),
     )
     AUTH_EMAIL = os.getenv("AUTH_EMAIL", "teacher@example.com")
     AUTH_PASSWORD = os.getenv("AUTH_PASSWORD", "secret")
@@ -42,7 +42,7 @@ class Config:
         if item.strip()
     ]
 
-    LLM_PROVIDER = os.getenv("LLM_PROVIDER", "mock").strip().lower()
+    LLM_PROVIDER = os.getenv("LLM_PROVIDER", "openai").strip().lower()
     GIGACHAT_AUTH_KEY = os.getenv("GIGACHAT_AUTH_KEY", "")
     GIGACHAT_MODEL = os.getenv("GIGACHAT_MODEL", "GigaChat-Pro")
     GIGACHAT_TEXT_MODEL = os.getenv("GIGACHAT_TEXT_MODEL", "")
@@ -62,7 +62,7 @@ class Config:
     }
     GIGACHAT_TIMEOUT = int(os.getenv("GIGACHAT_TIMEOUT", "90"))
     OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-    OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.5")
+    OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.4")
     OPENAI_TEXT_MODEL = os.getenv("OPENAI_TEXT_MODEL", "")
     OPENAI_API_BASE_URL = os.getenv("OPENAI_API_BASE_URL", "https://api.openai.com/v1")
     OPENAI_TIMEOUT = int(os.getenv("OPENAI_TIMEOUT", "90"))

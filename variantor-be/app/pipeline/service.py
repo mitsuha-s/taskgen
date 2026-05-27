@@ -3,9 +3,16 @@ import re
 import threading
 import uuid
 from dataclasses import dataclass
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 
+from docx import Document
+from pypdf import PdfReader
+from reportlab.lib.pagesizes import A4
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+from reportlab.pdfgen import canvas
 from werkzeug.datastructures import FileStorage
 
 from app.config import Config
@@ -23,6 +30,12 @@ SCORE_RE = re.compile(r"\b(10|[1-9])\b")
 TAG_RE = re.compile(r"(?is)<[^>]+>")
 SAFE_MODEL_RE = re.compile(r"^[A-Za-z0-9._:-]+$")
 SUPPORTED_PROVIDERS = {"mock", "gigachat", "openai"}
+PDF_FONT_NAME = "DejaVuSans"
+PDF_FONT_PATHS = (
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/usr/local/share/fonts/DejaVuSans.ttf",
+)
+_pdf_font_registered = False
 
 
 @dataclass
@@ -35,7 +48,7 @@ class TaskSection:
 
 
 @dataclass
-class SavedImage:
+class SavedFile:
     relative_path: str
     mime_type: str
     size_bytes: int
@@ -79,15 +92,15 @@ class PipelineService:
 
     def get_assignment(self, assignment_id: str) -> dict:
         assignment = self._assignment_or_404(assignment_id)
-        image = self._image_by_assignment_id(assignment_id, missing_ok=True)
+        images = self._images_by_assignment_id(assignment_id, missing_ok=True)
         latest_run = self._latest_run_for_assignment(assignment_id)
-        return self.assignment_payload(assignment, image=image, latest_run=latest_run)
+        return self.assignment_payload(assignment, image=(images[-1] if images else None), images=images, latest_run=latest_run)
 
     def save_assignment_image(self, assignment_id: str, file: FileStorage | None) -> dict:
         self._assignment_or_404(assignment_id)
         if file is None or not file.filename:
             raise ValidationError("Image file is required.", code="validation_error")
-        saved = self._save_image(assignment_id, file)
+        saved = self._save_file(assignment_id, file)
         with connect() as conn:
             image = conn.execute(
                 """
@@ -95,12 +108,6 @@ class PipelineService:
                     assignment_id, original_filename, stored_path, mime_type, size_bytes
                 )
                 values (%s, nullif(%s, ''), %s, %s, %s)
-                on conflict (assignment_id) do update set
-                    original_filename = excluded.original_filename,
-                    stored_path = excluded.stored_path,
-                    mime_type = excluded.mime_type,
-                    size_bytes = excluded.size_bytes,
-                    created_at = now()
                 returning *
                 """,
                 (assignment_id, file.filename, saved.relative_path, saved.mime_type, saved.size_bytes),
@@ -112,12 +119,58 @@ class PipelineService:
             "status": "image_uploaded",
         }
 
+    def save_assignment_files(self, assignment_id: str, files: list[FileStorage]) -> dict:
+        self._assignment_or_404(assignment_id)
+        valid_files = [item for item in files if item and item.filename]
+        if not valid_files:
+            raise ValidationError("At least one file is required.", code="validation_error")
+        saved_files = [self._save_file(assignment_id, file) for file in valid_files]
+        rows = []
+        with connect() as conn:
+            conn.execute("delete from assignment_images where assignment_id = %s", (assignment_id,))
+            for index, (file, saved) in enumerate(zip(valid_files, saved_files)):
+                row = conn.execute(
+                    """
+                    insert into assignment_images (
+                        assignment_id, original_filename, stored_path, mime_type, size_bytes, position
+                    )
+                    values (%s, nullif(%s, ''), %s, %s, %s, %s)
+                    returning *
+                    """,
+                    (assignment_id, file.filename, saved.relative_path, saved.mime_type, saved.size_bytes, index + 1),
+                ).fetchone()
+                rows.append(row)
+            conn.execute("update assignments set status = 'image_uploaded', updated_at = now() where id = %s", (assignment_id,))
+        return {
+            "assignment_id": assignment_id,
+            "files": [self.image_payload(row) for row in rows],
+            "status": "image_uploaded",
+        }
+
+    def preview_pdf_for_file(self, file: FileStorage | None) -> bytes:
+        if file is None or not file.filename:
+            raise ValidationError("File is required.", code="validation_error")
+        ext = Path(file.filename).suffix.lower()
+        raw = file.read() or b""
+        file.stream.seek(0)
+        if not raw:
+            raise ValidationError("File is empty.", code="validation_error")
+        if ext == ".pdf":
+            return raw
+        if ext == ".docx":
+            text = read_docx_text_from_bytes(raw)
+            return text_to_pdf_bytes(text)
+        if ext == ".doc":
+            text = raw.decode("utf-8", errors="ignore")
+            return text_to_pdf_bytes(text)
+        raise ValidationError("Preview is available only for PDF, DOC and DOCX files.", code="preview_not_supported")
+
     def start_extraction(self, assignment_id: str, options: dict[str, Any] | None = None) -> dict:
         options = options or {}
         self._assignment_or_404(assignment_id)
         use_default_source = bool(options.get("use_default_source"))
         if not use_default_source:
-            self._image_by_assignment_id(assignment_id)
+            self._images_by_assignment_id(assignment_id)
 
         step_selection = resolve_llm_selection(
             options,
@@ -216,6 +269,10 @@ class PipelineService:
                 if variant.strip() == content.strip():
                     parsed["selected_variant"] = index + 1
                     break
+            if existing.get("answers_by_variant"):
+                parsed["answers_by_variant"] = existing["answers_by_variant"]
+            if existing.get("answers_all"):
+                parsed["answers_all"] = existing["answers_all"]
 
         updated = self._update_run_results(
             run_id,
@@ -311,6 +368,10 @@ class PipelineService:
                 results.append(evaluation_result)
                 parsed["self_score"] = evaluation_result["content"]
                 parsed["steps"] = results
+            if step == GENERATION_STEP and variants:
+                answers_by_variant, answers_all = self._generate_answers_for_variants(run, variants, evaluation_selection)
+                parsed["answers_by_variant"] = answers_by_variant
+                parsed["answers_all"] = answers_all
 
             self._insert_llm_run(
                 task_type=pipeline_task_type(step),
@@ -358,7 +419,7 @@ class PipelineService:
         }
         if step == 1:
             if use_default_source:
-                source_html = self.prompts.default_source
+                source_html = normalize_source_document(self.prompts.default_source, self.prompts.is_json_pipeline)
                 llm_input["use_default_source"] = True
                 return (
                     LLMResponse(source_html, source_html, "local", "default-html"),
@@ -367,16 +428,38 @@ class PipelineService:
                     llm_input,
                 )
             provider = self._provider(selection)
-            image = self._image_by_assignment_id(str(run["assignment_id"]))
-            prompt = self.prompts.html_from_image_prompt()
-            llm_input.update({"image_path": image["stored_path"], "mime_type": image["mime_type"], "prompt": prompt})
-            response = provider.complete_with_file(
-                prompt,
-                file_path=str(Path(self.config.FILE_STORAGE_DIR) / image["stored_path"]),
-                mime_type=image["mime_type"],
-                model=selection.model or None,
+            prompt = self.prompts.source_from_image_prompt()
+            files = self._images_by_assignment_id(str(run["assignment_id"]))
+            llm_input.update(
+                {
+                    "file_count": len(files),
+                    "files": [{"path": item["stored_path"], "mime_type": item["mime_type"]} for item in files],
+                    "prompt": prompt,
+                }
             )
-            content = normalize_llm_text(response.content)
+            parts = []
+            raw_outputs = []
+            last_response: LLMResponse | None = None
+            for index, file in enumerate(files):
+                source = self._source_html_for_file(
+                    provider=provider,
+                    prompt=prompt,
+                    file_path=str(Path(self.config.FILE_STORAGE_DIR) / file["stored_path"]),
+                    mime_type=file["mime_type"],
+                    model=selection.model or None,
+                    index=index + 1,
+                    json_pipeline=self.prompts.is_json_pipeline,
+                )
+                parts.append(source["html"])
+                raw_outputs.append(source["raw"])
+                last_response = source["response"]
+            content = merge_json_documents(parts) if self.prompts.is_json_pipeline else merge_source_documents(parts)
+            response = LLMResponse(
+                content=content,
+                raw_response=json.dumps(raw_outputs, ensure_ascii=False, indent=2),
+                provider=(last_response.provider if last_response else selection.provider),
+                model=(last_response.model if last_response else selection.model),
+            )
             return response, step_result(1, "source_html", pipeline_step_title(1), content), [], llm_input
 
         if step == 2:
@@ -437,7 +520,7 @@ class PipelineService:
                     prompt = self.prompts.generation_prompt(section.html, params, bundle.get("user_comment", ""))
                     response = provider.complete_text(prompt, model=selection.model or None)
                     task_html = normalize_llm_text(response.content)
-                    if not contains_tag(task_html, "h2"):
+                    if not self.prompts.is_json_pipeline and not contains_tag(task_html, "h2"):
                         task_html = ensure_section_heading(section.html, task_html)
                     generated_tasks.append(task_html)
                     task_outputs.append(
@@ -552,6 +635,25 @@ class PipelineService:
         score = extract_score(response.content)
         return response, step_result(EVALUATION_STEP, "self_score", pipeline_step_title(EVALUATION_STEP), str(score)), score, llm_input
 
+    def _generate_answers_for_variants(
+        self,
+        run: dict,
+        variants: list[str],
+        selection: LLMSelection,
+    ) -> tuple[list[str], str]:
+        provider = self._provider(selection)
+        answers_by_variant: list[str] = []
+        for variant in variants:
+            prompt = self.prompts.answer_generation_prompt(variant)
+            response = provider.complete_text(prompt, model=selection.model or None)
+            answers_by_variant.append(normalize_llm_text(response.content))
+
+        all_answers = "\n".join(
+            f"<section><h2>Ответы к варианту {index + 1}</h2>{answers}</section>"
+            for index, answers in enumerate(answers_by_variant)
+        )
+        return answers_by_variant, all_answers
+
     def _assignment_or_404(self, assignment_id: str) -> dict:
         with connect() as conn:
             row = conn.execute("select * from assignments where id = %s", (assignment_id,)).fetchone()
@@ -567,14 +669,18 @@ class PipelineService:
         return row
 
     def _image_by_assignment_id(self, assignment_id: str, *, missing_ok: bool = False) -> dict | None:
+        rows = self._images_by_assignment_id(assignment_id, missing_ok=missing_ok)
+        return rows[-1] if rows else None
+
+    def _images_by_assignment_id(self, assignment_id: str, *, missing_ok: bool = False) -> list[dict]:
         with connect() as conn:
-            row = conn.execute(
-                "select * from assignment_images where assignment_id = %s order by created_at desc limit 1",
+            rows = conn.execute(
+                "select * from assignment_images where assignment_id = %s order by position asc, created_at asc",
                 (assignment_id,),
-            ).fetchone()
-        if row is None and not missing_ok:
+            ).fetchall()
+        if not rows and not missing_ok:
             raise NotFoundError("Assignment image was not found.", code="image_not_found")
-        return row
+        return rows or []
 
     def _latest_run_for_assignment(self, assignment_id: str) -> dict | None:
         with connect() as conn:
@@ -746,14 +852,17 @@ class PipelineService:
         except Exception:
             pass
 
-    def _save_image(self, assignment_id: str, file: FileStorage) -> SavedImage:
+    def _save_file(self, assignment_id: str, file: FileStorage) -> SavedFile:
+        ext = Path(file.filename or "").suffix.lower()
+        if ext and ext not in self.config.ALLOWED_UPLOAD_EXTENSIONS:
+            raise ValidationError("File extension is not allowed.", code="invalid_file_type")
         file.stream.seek(0)
         head = file.stream.read(512)
         file.stream.seek(0)
-        mime_type, ext = detect_image(head)
+        mime_type, ext = detect_supported_file(file.filename or "", head)
         if mime_type is None:
-            raise ValidationError("Only PNG, JPG and WEBP images are supported.", code="invalid_file_type")
-        relative_path = Path("assignments") / assignment_id / f"original{ext}"
+            raise ValidationError("Supported files: PNG, JPG, WEBP, PDF, DOC, DOCX.", code="invalid_file_type")
+        relative_path = Path("assignments") / assignment_id / f"{uuid.uuid4().hex}{ext}"
         full_path = Path(self.config.FILE_STORAGE_DIR) / relative_path
         full_path.parent.mkdir(parents=True, exist_ok=True)
         temp_path = full_path.with_suffix(full_path.suffix + ".tmp")
@@ -761,21 +870,53 @@ class PipelineService:
         size = temp_path.stat().st_size
         if size > self.config.MAX_UPLOAD_BYTES:
             temp_path.unlink(missing_ok=True)
-            raise ValidationError("Image must be 10 MB or smaller.", code="file_too_large", status_code=413)
+            raise ValidationError("File must be 10 MB or smaller.", code="file_too_large", status_code=413)
         temp_path.replace(full_path)
-        return SavedImage(relative_path=relative_path.as_posix(), mime_type=mime_type, size_bytes=size)
+        return SavedFile(relative_path=relative_path.as_posix(), mime_type=mime_type, size_bytes=size)
+
+    def _source_html_for_file(
+        self,
+        provider,
+        prompt: str,
+        file_path: str,
+        mime_type: str,
+        model: str | None,
+        index: int,
+        json_pipeline: bool,
+    ) -> dict:
+        if mime_type.startswith("image/"):
+            response = provider.complete_with_file(prompt, file_path=file_path, mime_type=mime_type, model=model)
+            source = normalize_source_document(response.content, json_pipeline)
+            return {"html": source, "raw": {"index": index, "mime_type": mime_type}, "response": response}
+        if mime_type == "application/pdf":
+            source = json_from_pdf(file_path, index) if json_pipeline else html_from_pdf(file_path, index)
+            response = LLMResponse(content=source, raw_response=source, provider="local", model="pdf-reader")
+            return {"html": source, "raw": {"index": index, "mime_type": mime_type}, "response": response}
+        if mime_type in {"application/vnd.openxmlformats-officedocument.wordprocessingml.document", "application/msword"}:
+            source = json_from_doc(file_path, index) if json_pipeline else html_from_doc(file_path, index)
+            response = LLMResponse(content=source, raw_response=source, provider="local", model="doc-reader")
+            return {"html": source, "raw": {"index": index, "mime_type": mime_type}, "response": response}
+        raise ValidationError("Unsupported file type for parsing.", code="invalid_file_type")
 
     def _background(self, target, *args) -> None:
         thread = threading.Thread(target=target, args=args, daemon=True)
         thread.start()
 
-    def assignment_payload(self, assignment: dict, *, image: dict | None = None, latest_run: dict | None = None) -> dict:
+    def assignment_payload(
+        self,
+        assignment: dict,
+        *,
+        image: dict | None = None,
+        images: list[dict] | None = None,
+        latest_run: dict | None = None,
+    ) -> dict:
         return {
             "id": str(assignment["id"]),
             "title": assignment.get("title") or "",
             "status": assignment["status"],
             "created_at": iso(assignment["created_at"]),
             "image": self.image_payload(image) if image else None,
+            "files": [self.image_payload(item) for item in (images or [])],
             "latest_extraction_run": (
                 {"id": str(latest_run["id"]), "status": latest_run["status"]} if latest_run else None
             ),
@@ -784,7 +925,8 @@ class PipelineService:
     def image_payload(self, image: dict) -> dict:
         return {
             "id": str(image["id"]),
-            "url": self.assignment_image_url(str(image["assignment_id"])),
+            "url": self.assignment_image_url(str(image["id"])),
+            "preview_url": self.assignment_image_preview_url(str(image["id"])),
             "mime_type": image["mime_type"],
             "size_bytes": image["size_bytes"],
         }
@@ -807,21 +949,229 @@ class PipelineService:
             "finished_at": iso(run.get("finished_at")),
         }
 
-    def assignment_image_url(self, assignment_id: str) -> str:
-        return f"{self.config.PUBLIC_FILE_BASE_URL}/assignments/{assignment_id}/original"
+    def assignment_image_url(self, image_id: str) -> str:
+        return f"{self.config.PUBLIC_FILE_BASE_URL}/assignment-images/{image_id}"
+
+    def assignment_image_preview_url(self, image_id: str) -> str:
+        return f"{self.config.PUBLIC_FILE_BASE_URL}/assignment-images/{image_id}/preview.pdf"
 
     def image_full_path(self, image: dict) -> Path:
         return Path(self.config.FILE_STORAGE_DIR) / image["stored_path"]
 
+    def image_by_id_or_404(self, image_id: str) -> dict:
+        with connect() as conn:
+            row = conn.execute("select * from assignment_images where id = %s", (image_id,)).fetchone()
+        if row is None:
+            raise NotFoundError("Assignment image was not found.", code="image_not_found")
+        return row
 
-def detect_image(head: bytes) -> tuple[str | None, str]:
+    def image_preview_pdf_bytes(self, image: dict) -> bytes:
+        path = self.image_full_path(image)
+        mime_type = str(image.get("mime_type") or "")
+        if mime_type == "application/pdf":
+            return path.read_bytes()
+        if mime_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+            text = read_docx_text(path)
+            return text_to_pdf_bytes(text)
+        if mime_type == "application/msword":
+            text = read_doc_text(path)
+            return text_to_pdf_bytes(text)
+        raise ValidationError("Preview PDF is available only for PDF, DOC and DOCX files.", code="preview_not_supported")
+
+
+def detect_supported_file(filename: str, head: bytes) -> tuple[str | None, str]:
+    ext = Path(filename).suffix.lower()
     if head.startswith(b"\xff\xd8\xff"):
         return "image/jpeg", ".jpg"
     if head.startswith(b"\x89PNG\r\n\x1a\n"):
         return "image/png", ".png"
     if len(head) >= 12 and head[:4] == b"RIFF" and head[8:12] == b"WEBP":
         return "image/webp", ".webp"
+    if head.startswith(b"%PDF"):
+        return "application/pdf", ".pdf"
+    if ext == ".docx":
+        return "application/vnd.openxmlformats-officedocument.wordprocessingml.document", ".docx"
+    if ext == ".doc":
+        return "application/msword", ".doc"
     return None, ""
+
+
+def html_from_pdf(file_path: str, index: int) -> str:
+    pages = []
+    reader = PdfReader(file_path)
+    for page in reader.pages:
+        text = (page.extract_text() or "").strip()
+        if text:
+            pages.append(text)
+    body = "\n\n".join(pages).strip()
+    return text_to_html_document(body, index)
+
+
+def json_from_pdf(file_path: str, index: int) -> str:
+    pages = []
+    reader = PdfReader(file_path)
+    for page in reader.pages:
+        text = (page.extract_text() or "").strip()
+        if text:
+            pages.append(text)
+    return text_to_json_document("\n\n".join(pages).strip(), index)
+
+
+def html_from_doc(file_path: str, index: int) -> str:
+    suffix = Path(file_path).suffix.lower()
+    if suffix == ".docx":
+        return text_to_html_document(read_docx_text(Path(file_path)), index)
+    return text_to_html_document(read_doc_text(Path(file_path)), index)
+
+
+def json_from_doc(file_path: str, index: int) -> str:
+    suffix = Path(file_path).suffix.lower()
+    if suffix == ".docx":
+        return text_to_json_document(read_docx_text(Path(file_path)), index)
+    return text_to_json_document(read_doc_text(Path(file_path)), index)
+
+
+def text_to_html_document(text: str, index: int) -> str:
+    clean = text.strip() or "Не удалось извлечь текст из файла."
+    paragraphs = "".join(f"<p>{escape_html(line)}</p>" for line in clean.splitlines() if line.strip())
+    if not paragraphs:
+        paragraphs = f"<p>{escape_html(clean)}</p>"
+    return (
+        "<!doctype html><html><body>"
+        f"<h2>Задание {index}</h2>"
+        f"{paragraphs}"
+        "</body></html>"
+    )
+
+def read_docx_text(path: Path) -> str:
+    document = Document(str(path))
+    lines = [p.text.strip() for p in document.paragraphs if p.text.strip()]
+    return "\n\n".join(lines)
+
+def read_docx_text_from_bytes(raw: bytes) -> str:
+    document = Document(BytesIO(raw))
+    lines = [p.text.strip() for p in document.paragraphs if p.text.strip()]
+    return "\n\n".join(lines)
+
+
+def read_doc_text(path: Path) -> str:
+    with path.open("rb") as f:
+        raw = f.read()
+    return raw.decode("utf-8", errors="ignore")
+
+
+def text_to_pdf_bytes(text: str) -> bytes:
+    font_name = pdf_font_name()
+    buffer = BytesIO()
+    pdf = canvas.Canvas(buffer, pagesize=A4)
+    pdf.setFont(font_name, 10)
+    width, height = A4
+    y = height - 40
+    for raw_line in (text.strip() or "Документ пуст.").splitlines():
+        line = raw_line.strip() or " "
+        while len(line) > 110:
+            pdf.drawString(40, y, line[:110])
+            y -= 14
+            line = line[110:]
+            if y < 40:
+                pdf.showPage()
+                pdf.setFont(font_name, 10)
+                y = height - 40
+        pdf.drawString(40, y, line)
+        y -= 14
+        if y < 40:
+            pdf.showPage()
+            pdf.setFont(font_name, 10)
+            y = height - 40
+    pdf.save()
+    return buffer.getvalue()
+
+
+def pdf_font_name() -> str:
+    global _pdf_font_registered
+    if _pdf_font_registered:
+        return PDF_FONT_NAME
+    for font_path in PDF_FONT_PATHS:
+        if Path(font_path).exists():
+            pdfmetrics.registerFont(TTFont(PDF_FONT_NAME, font_path))
+            _pdf_font_registered = True
+            return PDF_FONT_NAME
+    return "Helvetica"
+
+
+def text_to_json_document(text: str, index: int) -> str:
+    clean = text.strip() or "Не удалось извлечь текст из файла."
+    task = {
+        "title": f"Задание {index}",
+        "text": "".join(f"<p>{escape_html(line)}</p>" for line in clean.splitlines() if line.strip()),
+    }
+    return json.dumps({"tasks": [task]}, ensure_ascii=False, indent=2)
+
+
+def normalize_source_document(content: str, json_pipeline: bool) -> str:
+    normalized = normalize_llm_text(content)
+    if not json_pipeline:
+        return normalized
+    return json.dumps(parse_json_document(normalized), ensure_ascii=False, indent=2)
+
+
+def parse_json_document(content: str) -> dict:
+    parsed = json.loads(normalize_llm_text(content))
+    if isinstance(parsed, list):
+        return {"tasks": parsed}
+    if isinstance(parsed, dict) and isinstance(parsed.get("tasks"), list):
+        return parsed
+    if isinstance(parsed, dict):
+        return {"tasks": [parsed]}
+    raise PipelineStateError("source json must be an object or list")
+
+
+def parse_json_task(content: str) -> dict:
+    parsed = json.loads(normalize_llm_text(content))
+    if isinstance(parsed, dict) and isinstance(parsed.get("tasks"), list):
+        tasks = parsed["tasks"]
+        if tasks:
+            return tasks[0]
+    if isinstance(parsed, list) and parsed:
+        return parsed[0]
+    if isinstance(parsed, dict):
+        return parsed
+    raise PipelineStateError("task json must be an object")
+
+
+def merge_json_documents(parts: list[str]) -> str:
+    tasks = []
+    for part in parts:
+        tasks.extend(parse_json_document(part).get("tasks", []))
+    return json.dumps({"tasks": tasks}, ensure_ascii=False, indent=2)
+
+
+def merge_source_documents(parts: list[str]) -> str:
+    normalized = []
+    for index, part in enumerate(parts):
+        body = extract_body(part).strip()
+        if not body:
+            continue
+        normalized.append(f"<section data-source-index=\"{index + 1}\">{body}</section>")
+    if not normalized:
+        return "<!doctype html><html><body><h2>Задание 1</h2><p>Источник пуст.</p></body></html>"
+    return f"<!doctype html><html><body>{''.join(normalized)}</body></html>"
+
+
+def extract_body(html: str) -> str:
+    match = re.search(r"(?is)<body[^>]*>(.*?)</body>", html)
+    if match:
+        return match.group(1)
+    return html
+
+
+def escape_html(value: str) -> str:
+    return (
+        value.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+    )
 
 
 def provider_options(config: Config) -> list[dict]:
@@ -847,9 +1197,8 @@ def provider_options(config: Config) -> list[dict]:
             "id": "openai",
             "label": "OpenAI",
             "configured": bool(config.OPENAI_API_KEY),
-            "default_model": config.OPENAI_MODEL or "gpt-5.5",
+            "default_model": config.OPENAI_MODEL or "gpt-5.4",
             "models": [
-                {"id": "gpt-5.5", "label": "GPT-5.5"},
                 {"id": "gpt-5.4", "label": "GPT-5.4"},
                 {"id": "gpt-5.4-mini", "label": "GPT-5.4 mini"},
                 {"id": "gpt-5.4-nano", "label": "GPT-5.4 nano"},
@@ -881,7 +1230,7 @@ def default_model_for_provider(provider: str, config: Config) -> str:
     if provider == "gigachat":
         return config.GIGACHAT_MODEL or "GigaChat-Pro"
     if provider == "openai":
-        return config.OPENAI_MODEL or "gpt-5.5"
+        return config.OPENAI_MODEL or "gpt-5.4"
     return "mock"
 
 
@@ -897,7 +1246,7 @@ def resolve_model_for_provider(option: str, provider: str, config: Config, fallb
             "lite": "GigaChat-2",
         },
         "openai": {
-            "pro": config.OPENAI_MODEL or "gpt-5.5",
+            "pro": config.OPENAI_MODEL or "gpt-5.4",
             "lite": "gpt-5.4-mini",
         },
         "mock": {
@@ -951,6 +1300,8 @@ def build_pipeline_content(results: list[dict]) -> dict:
         "source_html": result_content(results, "source_html"),
         "parameters": result_content(results, "parameters"),
         "variant_html": result_content(results, "variant_html"),
+        "answers_by_variant": [],
+        "answers_all": "",
         "self_score": result_content(results, "self_score"),
         "steps": results,
     }
@@ -983,6 +1334,7 @@ def normalize_llm_text(content: str) -> str:
 def parse_task_parameters(content: str) -> dict:
     return {
         "task_type": extract_labeled_value(content, "Тип задания"),
+        "subject": extract_labeled_value(content, "Предмет"),
         "school_class": extract_labeled_value(content, "Предполагаемый класс"),
         "difficulty": extract_labeled_value(content, "Уровень сложности задания"),
     }
@@ -1009,6 +1361,25 @@ def parse_parameter_bundle(content: str) -> dict:
 
 
 def extract_task_sections(source_html: str) -> list[TaskSection]:
+    try:
+        tasks = parse_json_document(source_html).get("tasks", [])
+    except Exception:
+        tasks = []
+    if tasks:
+        sections = []
+        for index, task in enumerate(tasks):
+            task_json = json.dumps(task, ensure_ascii=False, indent=2)
+            sections.append(
+                TaskSection(
+                    number=index + 1,
+                    heading=str(task.get("title") or f"Задание {index + 1}"),
+                    html=task_json,
+                    start=index,
+                    end=index + 1,
+                )
+            )
+        return sections
+
     lower = source_html.lower()
     trailing_start = len(source_html)
     body_close = lower.rfind("</body>")
@@ -1062,6 +1433,12 @@ def extract_task_heading(section_html: str) -> str:
 def merge_task_sections(source_html: str, sections: list[TaskSection], replacements: list[str]) -> str:
     if len(sections) != len(replacements):
         raise PipelineStateError("task replacement count does not match source task count")
+    try:
+        parse_json_document(source_html)
+        tasks = [parse_json_task(replacement) for replacement in replacements]
+        return json.dumps({"tasks": tasks}, ensure_ascii=False, indent=2)
+    except json.JSONDecodeError:
+        pass
     parts = [source_html[: sections[0].start]]
     for index, section in enumerate(sections):
         parts.append(replacements[index].strip())

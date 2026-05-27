@@ -2,15 +2,15 @@ services:
   postgres:
     image: public.ecr.aws/docker/library/postgres:17-alpine
     environment:
-      POSTGRES_DB: variantor
-      POSTGRES_USER: app
-      POSTGRES_PASSWORD: app
+      POSTGRES_DB: ${POSTGRES_DB:-variantor}
+      POSTGRES_USER: ${POSTGRES_USER:-app}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-app}
     ports:
       - "127.0.0.1:${POSTGRES_PORT:-55432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U app -d variantor"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-app} -d ${POSTGRES_DB:-variantor}"]
       interval: 5s
       timeout: 3s
       retries: 12
@@ -22,22 +22,24 @@ services:
     env_file:
       - .env
     environment:
-      APP_ENV: local
-      DATABASE_URL: postgresql://app:app@postgres:5432/variantor
+      APP_ENV: ${APP_ENV:-local}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD:-app}@postgres:5432/${POSTGRES_DB:-variantor}
       AUTH_EMAIL: ${AUTH_EMAIL:-teacher@example.com}
       AUTH_PASSWORD: ${AUTH_PASSWORD:-secret}
       FILE_STORAGE_DIR: /app/storage/uploads
       PUBLIC_FILE_BASE_URL: /api/files
       MIGRATIONS_DIR: /app/migrations
-      PROMPTS_DIR: /app/prompts/task_processing_pipeline_v1
-      CORS_ALLOWED_ORIGIN: http://localhost:${APP_PORT:-18080},http://127.0.0.1:${APP_PORT:-18080},http://127.0.0.1:5173,http://localhost:5173
-      LLM_PROVIDER: ${LLM_PROVIDER:-mock}
+      PROMPTS_DIR: ${PROMPTS_DIR:-/app/prompts/task_processing_pipeline_v2}
+      CORS_ALLOWED_ORIGIN: ${CORS_ALLOWED_ORIGIN:-http://localhost:80,http://127.0.0.1:80,http://127.0.0.1:5173,http://localhost:5173}
+      LLM_PROVIDER: ${LLM_PROVIDER:-openai}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-5.5}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-5.4}
       OPENAI_TEXT_MODEL: ${OPENAI_TEXT_MODEL:-}
       OPENAI_API_BASE_URL: ${OPENAI_API_BASE_URL:-https://api.openai.com/v1}
       OPENAI_TIMEOUT: ${OPENAI_TIMEOUT:-90}
-      MAX_UPLOAD_BYTES: "10485760"
+      MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-10485760}
+      MAX_VARIANT_COUNT: ${MAX_VARIANT_COUNT:-10}
+      ALLOWED_UPLOAD_EXTENSIONS: ${ALLOWED_UPLOAD_EXTENSIONS:-.png,.jpg,.jpeg,.webp,.pdf,.doc,.docx}
     volumes:
       - backend_uploads:/app/storage/uploads
     depends_on:
@@ -49,7 +51,7 @@ services:
       context: ../variantor-fe
       dockerfile: Dockerfile
     ports:
-      - "127.0.0.1:${APP_PORT:-18080}:80"
+      - "${APP_PORT:-80}:80"
     depends_on:
       - backend
 

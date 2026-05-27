@@ -22,7 +22,7 @@ class OpenAIProvider:
 
     def __init__(self, config: OpenAIConfig):
         self.config = config
-        self.model = config.model or "gpt-5.5"
+        self.model = config.model or "gpt-5.4"
         self.text_model = config.text_model or self.model
         self.api_base_url = config.api_base_url.rstrip("/")
 

@@ -29,9 +29,9 @@ services:
       FILE_STORAGE_DIR: /app/storage/uploads
       PUBLIC_FILE_BASE_URL: ${PUBLIC_FILE_BASE_URL:-/api/files}
       MIGRATIONS_DIR: /app/migrations
-      PROMPTS_DIR: /app/prompts/task_processing_pipeline_v1
-      CORS_ALLOWED_ORIGIN: http://localhost:${APP_PORT:-18080},http://127.0.0.1:${APP_PORT:-18080},http://127.0.0.1:5173,http://localhost:5173
-      LLM_PROVIDER: ${LLM_PROVIDER:-mock}
+      PROMPTS_DIR: ${PROMPTS_DIR:-/app/prompts/task_processing_pipeline_v2}
+      CORS_ALLOWED_ORIGIN: http://localhost:${APP_PORT:-80},http://127.0.0.1:${APP_PORT:-80},http://127.0.0.1:5173,http://localhost:5173
+      LLM_PROVIDER: ${LLM_PROVIDER:-openai}
       GIGACHAT_AUTH_KEY: ${GIGACHAT_AUTH_KEY:-}
       GIGACHAT_MODEL: ${GIGACHAT_MODEL:-GigaChat-Pro}
       GIGACHAT_TEXT_MODEL: ${GIGACHAT_TEXT_MODEL:-}
@@ -41,13 +41,13 @@ services:
       GIGACHAT_VERIFY_TLS: ${GIGACHAT_VERIFY_TLS:-true}
       GIGACHAT_TIMEOUT: ${GIGACHAT_TIMEOUT:-90}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-5.5}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-5.4}
       OPENAI_TEXT_MODEL: ${OPENAI_TEXT_MODEL:-}
       OPENAI_API_BASE_URL: ${OPENAI_API_BASE_URL:-https://api.openai.com/v1}
       OPENAI_TIMEOUT: ${OPENAI_TIMEOUT:-90}
       MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-10485760}
       MAX_VARIANT_COUNT: ${MAX_VARIANT_COUNT:-10}
-      ALLOWED_UPLOAD_EXTENSIONS: ${ALLOWED_UPLOAD_EXTENSIONS:-.png,.jpg,.jpeg,.webp}
+      ALLOWED_UPLOAD_EXTENSIONS: ${ALLOWED_UPLOAD_EXTENSIONS:-.png,.jpg,.jpeg,.webp,.pdf,.doc,.docx}
     volumes:
       - backend_uploads:/app/storage/uploads
     depends_on:
@@ -71,7 +71,7 @@ services:
       context: ./variantor-fe
       dockerfile: Dockerfile
     ports:
-      - "127.0.0.1:${APP_PORT:-18080}:80"
+      - "${APP_PORT:-80}:80"
     depends_on:
       backend:
         condition: service_healthy

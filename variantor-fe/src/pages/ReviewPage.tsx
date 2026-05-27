@@ -72,10 +72,11 @@ export default function ReviewPage() {
   const sourceHTML = data?.parsed_content?.source_html ?? steps.find((step) => step.key === 'source_html')?.content ?? '';
   const finalHTML = data?.parsed_content?.variant_html ?? steps.find((step) => step.key === 'variant_html')?.content ?? '';
   const variantsHTML = data?.parsed_content?.variants_html ?? (finalHTML ? [finalHTML] : []);
+  const variantAnswers = data?.parsed_content?.answers_by_variant ?? [];
+  const allAnswers = data?.parsed_content?.answers_all ?? '';
   const selectedVariant = data?.parsed_content?.selected_variant ?? 1;
   const isRunning = data?.status === 'pending' || data?.status === 'running' || run.isLoading;
   const canContinue = data?.status === 'awaiting_confirmation' && data.current_step < totalSteps;
-  const imageURL = assignment.data?.image?.url;
   const defaultSelection = defaultLLMSelection(llmOptions.data);
   const selectionForStep = (step: number) => normalizeLLMSelection(stepSelections[step] ?? defaultSelection, llmOptions.data);
   const updateStepSelection = (step: number, selection: LLMSelection) =>
@@ -138,20 +139,7 @@ export default function ReviewPage() {
         </div>
       )}
 
-      <section className="grid gap-6 xl:grid-cols-[minmax(520px,0.95fr)_minmax(520px,1.05fr)] 2xl:grid-cols-[minmax(640px,0.9fr)_minmax(720px,1.1fr)]">
-        <div className="panel overflow-hidden">
-          <div className="section-title">Оригинальное изображение</div>
-          <div className="flex min-h-[560px] items-center justify-center bg-[linear-gradient(135deg,#fff7ed,#f7f5ff_48%,#e9fbff)] p-4 2xl:min-h-[680px]">
-            {imageURL ? (
-              <a href={imageURL} target="_blank" rel="noreferrer" className="block w-full">
-                <img className="max-h-[780px] w-full rounded-lg object-contain shadow-sm 2xl:max-h-[940px]" src={imageURL} alt="Оригинальное задание" />
-              </a>
-            ) : (
-              <div className="max-w-xs text-center text-sm leading-6 text-slate-500">Изображение не загружено или используется встроенный HTML-шаблон.</div>
-            )}
-          </div>
-        </div>
-
+      <section className="grid gap-6">
         <div className="panel overflow-hidden">
           <div className="section-title">Результаты обработки</div>
           <div className="space-y-4 p-4 sm:p-5">
@@ -207,6 +195,8 @@ export default function ReviewPage() {
                 <FinalDocumentCard
                   sourceHTML={sourceHTML}
                   variants={variantsHTML}
+                  answersByVariant={variantAnswers}
+                  answersAll={allAnswers}
                   selectedVariant={selectedVariant}
                   onAcceptVariant={async (variant) => {
                     await updateStep.mutateAsync({ step: 3, content: variant });
@@ -325,6 +315,7 @@ function StepContentView({ step }: { step: PipelineStepResult }) {
 }
 
 const taskTypeOptions = ['*', 'Множественный выбор (Multiple choice)', 'Альтернативный выбор (True/False)', 'Перекрестный выбор (Matching)', 'Упорядочение (Rearrangement)', 'Заполнение пропусков (Completion)', 'Вставка слова в нужной форме / Трансформация (Transformation)', 'Ответ на вопрос (Answering questions)', 'Перевод (Translation)', 'Диалог / Интервью (Dialogue / Interview)', 'Обсуждение (Discussion)', 'Написание письма / эссе (Letter / Essay writing)', 'Имитация / Кроссворд / языковые игры (Crossword / Language games)'];
+const subjectOptions = ['*', 'Английский язык', 'Русский язык', 'Литература', 'Математика', 'Алгебра', 'Геометрия', 'Информатика', 'Физика', 'Химия', 'Биология', 'История', 'Обществознание', 'География', 'Иностранный язык', 'Другое'];
 const classOptions = ['*', ...Array.from({ length: 11 }, (_, index) => String(index + 1))];
 const difficultyOptions = ['*', ...Array.from({ length: 10 }, (_, index) => String(index + 1))];
 
@@ -332,12 +323,14 @@ type TaskParametersItem = {
   task_number: number;
   heading: string;
   task_type: string;
+  subject: string;
   school_class: string;
   difficulty: string;
 };
 
 type ParameterBundle = {
   tasks: TaskParametersItem[];
+  subject?: string;
   user_comment?: string;
 };
 
@@ -355,8 +348,9 @@ function TaskParametersView({ content }: { content: string }) {
       {bundle.tasks.map((task) => (
         <div key={task.task_number} className="rounded-lg border border-slate-200/80 bg-[linear-gradient(135deg,#ffffff,#f8fbff)] p-4">
           <div className="text-sm font-semibold text-slate-900">{task.heading || `Задание ${task.task_number}`}</div>
-          <div className="mt-3 grid gap-2 text-sm text-slate-700 sm:grid-cols-3">
+          <div className="mt-3 grid gap-2 text-sm text-slate-700 sm:grid-cols-4">
             <div><span className="font-medium text-slate-900">Тип:</span> {task.task_type}</div>
+            <div><span className="font-medium text-slate-900">Предмет:</span> {task.subject}</div>
             <div><span className="font-medium text-slate-900">Класс:</span> {task.school_class}</div>
             <div><span className="font-medium text-slate-900">Сложность:</span> {task.difficulty}</div>
           </div>
@@ -399,8 +393,13 @@ function ParameterEditor({
 }) {
   const initial = parseParameters(content);
   const [tasks, setTasks] = useState(initial.tasks);
+  const [subject, setSubject] = useState(initial.subject ?? '*');
   const [comment, setComment] = useState(initial.user_comment ?? '');
-  const value = formatParameters({ tasks, user_comment: comment });
+  const value = formatParameters({
+    tasks: tasks.map((task) => ({ ...task, subject })),
+    subject,
+    user_comment: comment,
+  });
 
   function updateTask(index: number, field: keyof TaskParametersItem, value: string) {
     setTasks((current) => current.map((task, taskIndex) => (
@@ -411,6 +410,7 @@ function ParameterEditor({
   return (
     <div className="space-y-4 p-4">
       <div className="space-y-4">
+        <SelectField label="Предмет" value={normalizeOption(subject, subjectOptions)} options={subjectOptions} onChange={(value) => setSubject(value)} />
         {tasks.map((task, index) => (
           <div key={task.task_number} className="rounded-lg border border-slate-200/80 bg-[linear-gradient(135deg,#ffffff,#f8fbff)] p-4">
             <div className="mb-3 text-sm font-semibold text-slate-900">{task.heading || `Задание ${task.task_number}`}</div>
@@ -558,25 +558,34 @@ function CompletedState() {
 function FinalDocumentCard({
   sourceHTML,
   variants,
+  answersByVariant,
+  answersAll,
   selectedVariant,
   onAcceptVariant,
   title,
 }: {
   sourceHTML: string;
   variants: string[];
+  answersByVariant: string[];
+  answersAll: string;
   selectedVariant: number;
   onAcceptVariant: (variant: string) => Promise<unknown>;
   title: string;
 }) {
   const documentRef = useRef<HTMLDivElement>(null);
   const allVariantsDocumentRef = useRef<HTMLDivElement>(null);
+  const answerDocumentRef = useRef<HTMLDivElement>(null);
+  const allAnswersDocumentRef = useRef<HTMLDivElement>(null);
   const [generating, setGenerating] = useState(false);
   const [generatingAll, setGeneratingAll] = useState(false);
+  const [generatingAnswers, setGeneratingAnswers] = useState(false);
+  const [generatingAllAnswers, setGeneratingAllAnswers] = useState(false);
   const [activeIndex, setActiveIndex] = useState(Math.max(0, selectedVariant - 1));
   const [accepting, setAccepting] = useState(false);
 
   const safeVariants = variants.filter((variant) => variant.trim().length > 0);
   const activeVariant = safeVariants[activeIndex] ?? '';
+  const activeAnswers = answersByVariant[activeIndex] ?? '';
 
   async function downloadPDF() {
     if (!documentRef.current || !activeVariant.trim()) {
@@ -650,6 +659,48 @@ function FinalDocumentCard({
     }
   }
 
+  async function downloadAnswersPDF() {
+    if (!answerDocumentRef.current || !activeAnswers.trim()) {
+      return;
+    }
+    setGeneratingAnswers(true);
+    try {
+      const html2pdf = (await import('html2pdf.js')).default;
+      const pdfOptions: Record<string, unknown> = {
+        margin: [12, 12, 14, 12],
+        filename: `${safeFilename(title)}-variant-${activeIndex + 1}-answers.pdf`,
+        image: { type: 'jpeg', quality: 0.98 },
+        html2canvas: { scale: 2, backgroundColor: '#ffffff', useCORS: true },
+        jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' },
+        pagebreak: { mode: ['css', 'legacy'] },
+      };
+      await html2pdf().set(pdfOptions).from(answerDocumentRef.current).save();
+    } finally {
+      setGeneratingAnswers(false);
+    }
+  }
+
+  async function downloadAllAnswersPDF() {
+    if (!allAnswersDocumentRef.current || !answersAll.trim()) {
+      return;
+    }
+    setGeneratingAllAnswers(true);
+    try {
+      const html2pdf = (await import('html2pdf.js')).default;
+      const pdfOptions: Record<string, unknown> = {
+        margin: [10, 10, 12, 10],
+        filename: `${safeFilename(title)}-all-answers.pdf`,
+        image: { type: 'jpeg', quality: 0.98 },
+        html2canvas: { scale: 2, backgroundColor: '#ffffff', useCORS: true },
+        jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' },
+        pagebreak: { mode: ['css', 'legacy'] },
+      };
+      await html2pdf().set(pdfOptions).from(allAnswersDocumentRef.current).save();
+    } finally {
+      setGeneratingAllAnswers(false);
+    }
+  }
+
   if (!activeVariant.trim()) {
     return null;
   }
@@ -669,6 +720,14 @@ function FinalDocumentCard({
           <button className="btn-secondary" disabled={generatingAll || safeVariants.length === 0} onClick={downloadAllVariantsPDF} type="button">
             {generatingAll ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" /> : <Download className="h-4 w-4" aria-hidden="true" />}
             Скачать все варианты PDF
+          </button>
+          <button className="btn-secondary" disabled={generatingAnswers || !activeAnswers.trim()} onClick={downloadAnswersPDF} type="button">
+            {generatingAnswers ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" /> : <Download className="h-4 w-4" aria-hidden="true" />}
+            Скачать ответы для варианта
+          </button>
+          <button className="btn-secondary" disabled={generatingAllAnswers || !answersAll.trim()} onClick={downloadAllAnswersPDF} type="button">
+            {generatingAllAnswers ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" /> : <Download className="h-4 w-4" aria-hidden="true" />}
+            Скачать ответы на все варианты
           </button>
           <button className="btn-primary" disabled={generating} onClick={downloadPDF} type="button">
             {generating ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" /> : <Download className="h-4 w-4" aria-hidden="true" />}
@@ -724,15 +783,51 @@ function FinalDocumentCard({
             </section>
           ))}
         </div>
+        <div ref={answerDocumentRef} className="bg-white px-10 py-9 text-slate-950">
+          <div className="mb-7 border-b border-slate-200 pb-4">
+            <div className="text-xs font-semibold uppercase tracking-wider text-leaf">Ответы</div>
+            <div className="mt-2 text-2xl font-semibold leading-tight text-slate-950">{title} · вариант {activeIndex + 1}</div>
+          </div>
+          <HTMLDocument html={activeAnswers} />
+        </div>
+        <div ref={allAnswersDocumentRef} className="bg-white px-8 py-8 text-slate-950">
+          <HTMLDocument html={answersAll} />
+        </div>
       </div>
     </section>
   );
 }
 
 function HTMLDocument({ html }: { html: string }) {
+  const rendered = jsonPipelineDocumentToHTML(html) ?? html;
   return (
-    <div className="document-html max-w-none" dangerouslySetInnerHTML={{ __html: html }} />
+    <div className="document-html max-w-none" dangerouslySetInnerHTML={{ __html: rendered }} />
   );
+}
+
+function jsonPipelineDocumentToHTML(value: string) {
+  try {
+    const parsed = JSON.parse(value) as { tasks?: Array<{ title?: string; text?: string }> } | Array<{ title?: string; text?: string }>;
+    const tasks = Array.isArray(parsed) ? parsed : parsed.tasks;
+    if (!Array.isArray(tasks)) {
+      return null;
+    }
+    return tasks.map((task, index) => {
+      const title = task.title?.trim() || `Задание ${index + 1}`;
+      const text = task.text?.trim() || '';
+      return `<section><h2>${escapeHTML(title)}</h2>${text}</section>`;
+    }).join('');
+  } catch {
+    return null;
+  }
+}
+
+function escapeHTML(value: string) {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
 }
 
 function FailedState({ message, onRetry, retrying }: { message: string; onRetry: () => void; retrying: boolean }) {
@@ -771,15 +866,18 @@ function parseParameters(content: string) {
             task_number: task.task_number ?? index + 1,
             heading: task.heading ?? `Задание ${index + 1}`,
             task_type: normalizeTaskType(task.task_type ?? '*'),
+            subject: normalizeSubject(task.subject ?? parsed.subject ?? '*'),
             school_class: normalizeOption(task.school_class ?? '*', classOptions),
             difficulty: normalizeOption(task.difficulty ?? '*', difficultyOptions),
           }))
         : [],
+      subject: normalizeSubject(parsed.subject ?? parsed.tasks?.[0]?.subject ?? '*'),
       user_comment: parsed.user_comment ?? '',
     };
   } catch {
     return {
       tasks: [],
+      subject: '*',
       user_comment: '',
     };
   }
@@ -800,6 +898,10 @@ function normalizeTaskType(value: string) {
     return 'Множественный выбор (Multiple choice)';
   }
   return '*';
+}
+
+function normalizeSubject(value: string) {
+  return normalizeOption(value, subjectOptions);
 }
 
 function formatParameters(values: ParameterBundle) {

@@ -9,12 +9,14 @@ export type Assignment = {
   status: string;
   created_at: string;
   image: AssignmentImage | null;
+  files?: AssignmentImage[];
   latest_extraction_run: RunSummary | null;
 };
 
 export type AssignmentImage = {
   id: string;
   url: string;
+  preview_url?: string;
   mime_type: string;
   size_bytes: number;
 };
@@ -46,6 +48,8 @@ export type PipelineContent = {
   parameters?: string;
   variant_html?: string;
   variants_html?: string[];
+  answers_by_variant?: string[];
+  answers_all?: string;
   selected_variant?: number;
   self_score?: string;
   steps: PipelineStepResult[];
@@ -168,6 +172,37 @@ export const api = {
         body: formData,
       },
     );
+  },
+  uploadFiles: (assignmentId: string, files: File[]) => {
+    const formData = new FormData();
+    files.forEach((file) => formData.append('files', file));
+    return request<{ assignment_id: string; files: AssignmentImage[]; status: string }>(
+      `/api/assignments/${assignmentId}/files`,
+      {
+        method: 'POST',
+        body: formData,
+      },
+    );
+  },
+  previewFilePdf: async (file: File) => {
+    const formData = new FormData();
+    formData.set('file', file);
+    const response = await fetch('/api/files/preview.pdf', {
+      method: 'POST',
+      body: formData,
+      credentials: 'include',
+    });
+    if (!response.ok) {
+      const isJSON = response.headers.get('Content-Type')?.includes('application/json');
+      const body = isJSON ? ((await response.json()) as ErrorBody) : null;
+      const error = body?.error;
+      throw new APIError(
+        error?.code ?? 'request_failed',
+        error?.message ?? 'Не удалось выполнить запрос.',
+        response.status,
+      );
+    }
+    return response.blob();
   },
   startExtraction: (assignmentId: string, options?: ExtractionOptions) =>
     request<{ extraction_run_id: string; status: string }>(
