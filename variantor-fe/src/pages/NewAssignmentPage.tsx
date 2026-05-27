@@ -1,13 +1,11 @@
 import { zodResolver } from '@hookform/resolvers/zod';
-import { useMutation, useQuery } from '@tanstack/react-query';
+import { useMutation } from '@tanstack/react-query';
 import { FileText, Loader2, UploadCloud } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { useForm } from 'react-hook-form';
 import { useNavigate } from 'react-router-dom';
 import { z } from 'zod';
-import { LLMSelector } from '../components/LLMSelector';
-import { api, ExtractionOptions, LLMSelection, userMessage } from '../lib/api';
-import { normalizeLLMSelection } from '../lib/llm';
+import { api, ExtractionOptions, userMessage } from '../lib/api';
 
 const maxFileSize = 10 * 1024 * 1024;
 const allowedExtensions = ['.png', '.jpg', '.jpeg', '.webp', '.pdf', '.doc', '.docx'];
@@ -15,7 +13,6 @@ let uploadItemCounter = 0;
 
 const schema = z.object({
   title: z.string().max(160, 'Название слишком длинное.').optional(),
-  useDefaultSource: z.boolean().optional(),
 });
 
 type FormValues = z.infer<typeof schema>;
@@ -23,20 +20,14 @@ type UploadItem = { id: string; file: File };
 export default function NewAssignmentPage() {
   const navigate = useNavigate();
   const [submitError, setSubmitError] = useState<string | null>(null);
-  const [stepOneSelection, setStepOneSelection] = useState<LLMSelection>({ provider: '', model: '' });
   const [files, setFiles] = useState<UploadItem[]>([]);
   const [isDragActive, setIsDragActive] = useState(false);
   const [dragDepth, setDragDepth] = useState(0);
   const [draggedId, setDraggedId] = useState<string | null>(null);
 
-  const llmOptions = useQuery({
-    queryKey: ['llm-options'],
-    queryFn: api.getLLMOptions,
-  });
-
   const form = useForm<FormValues>({
     resolver: zodResolver(schema),
-    defaultValues: { title: '', useDefaultSource: false },
+    defaultValues: { title: '' },
   });
 
   const createAssignment = useMutation({ mutationFn: api.createAssignment });
@@ -49,14 +40,10 @@ export default function NewAssignmentPage() {
       api.startExtraction(assignmentId, options),
   });
 
-  const useDefaultSource = form.watch('useDefaultSource') ?? false;
-  const isSubmitting = createAssignment.isPending || uploadFiles.isPending || startExtraction.isPending || llmOptions.isLoading;
+  const isSubmitting = createAssignment.isPending || uploadFiles.isPending || startExtraction.isPending;
 
   useEffect(() => {
     function onPaste(event: ClipboardEvent) {
-      if (useDefaultSource) {
-        return;
-      }
       const pasted = Array.from(event.clipboardData?.files ?? []);
       if (pasted.length > 0) {
         event.preventDefault();
@@ -65,7 +52,7 @@ export default function NewAssignmentPage() {
     }
     window.addEventListener('paste', onPaste);
     return () => window.removeEventListener('paste', onPaste);
-  }, [useDefaultSource]);
+  }, []);
 
   useEffect(() => {
     function hasFiles(event: DragEvent) {
@@ -108,9 +95,6 @@ export default function NewAssignmentPage() {
       event.preventDefault();
       setDragDepth(0);
       setIsDragActive(false);
-      if (useDefaultSource) {
-        return;
-      }
       appendFiles(Array.from(event.dataTransfer?.files ?? []));
     }
 
@@ -124,7 +108,7 @@ export default function NewAssignmentPage() {
       window.removeEventListener('dragleave', onDragLeave);
       window.removeEventListener('drop', onDrop);
     };
-  }, [useDefaultSource]);
+  }, []);
 
   function appendFiles(incoming: File[]) {
     const accepted = incoming.filter((file) => {
@@ -166,23 +150,16 @@ export default function NewAssignmentPage() {
 
   async function onSubmit(values: FormValues) {
     setSubmitError(null);
-    const useLocalDefault = values.useDefaultSource === true;
-    if (!useLocalDefault && files.length === 0) {
+    if (files.length === 0) {
       setSubmitError('Добавьте хотя бы один файл.');
       return;
     }
     try {
       const assignment = await createAssignment.mutateAsync(values.title ?? '');
-      if (!useLocalDefault) {
-        await uploadFiles.mutateAsync({ assignmentId: assignment.id, upload: files.map((item) => item.file) });
-      }
+      await uploadFiles.mutateAsync({ assignmentId: assignment.id, upload: files.map((item) => item.file) });
       const run = await startExtraction.mutateAsync({
         assignmentId: assignment.id,
-        options: {
-          use_default_source: useLocalDefault,
-          step_provider: normalizeLLMSelection(stepOneSelection, llmOptions.data).provider,
-          step_model: normalizeLLMSelection(stepOneSelection, llmOptions.data).model,
-        },
+        options: {},
       });
       navigate(`/assignments/${assignment.id}/review?run=${run.extraction_run_id}`);
     } catch (error) {
@@ -222,9 +199,8 @@ export default function NewAssignmentPage() {
             <div className="space-y-2">
               <div className="flex items-center justify-between gap-3">
                 <label className="label" htmlFor="file-input">Файлы задания</label>
-                {useDefaultSource ? <span className="rounded-full bg-[linear-gradient(135deg,#e7e5ff,#dff7ff)] px-3 py-1 text-xs font-semibold text-leaf">Демо HTML</span> : null}
               </div>
-              <label className={`flex min-h-28 flex-col items-center justify-center gap-2 rounded-lg border border-dashed px-4 py-6 text-center transition ${useDefaultSource ? 'cursor-not-allowed border-slate-200 bg-[linear-gradient(135deg,#f8fafc,#e7e5ff)] text-slate-400' : 'cursor-pointer border-slate-300 bg-[linear-gradient(135deg,#ffffff,#f7f5ff)] hover:border-leaf hover:bg-moss/30'}`} htmlFor="file-input">
+              <label className="flex min-h-28 cursor-pointer flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-slate-300 bg-[linear-gradient(135deg,#ffffff,#f7f5ff)] px-4 py-6 text-center transition hover:border-leaf hover:bg-moss/30" htmlFor="file-input">
                 <span className="text-sm font-medium text-slate-800">Нажмите или перетащите файлы</span>
                 <span className="text-xs text-slate-500">PNG, JPG, WEBP, PDF, DOC, DOCX до 10 MB каждый</span>
               </label>
@@ -233,7 +209,6 @@ export default function NewAssignmentPage() {
                 className="sr-only"
                 type="file"
                 multiple
-                disabled={useDefaultSource}
                 accept=".png,.jpg,.jpeg,.webp,.pdf,.doc,.docx"
                 onChange={(event) => appendFiles(Array.from(event.target.files ?? []))}
               />
@@ -246,7 +221,7 @@ export default function NewAssignmentPage() {
                   <div
                     key={item.id}
                     className="flex items-center justify-between rounded-md border border-slate-200 bg-white px-3 py-2 text-sm"
-                    draggable={!useDefaultSource}
+                    draggable
                     onDragStart={() => setDraggedId(item.id)}
                     onDragOver={(event) => event.preventDefault()}
                     onDrop={() => {
@@ -269,20 +244,6 @@ export default function NewAssignmentPage() {
                 {files.length === 0 ? <div className="text-sm text-slate-500">Файлы не добавлены.</div> : null}
               </div>
             </div>
-
-            <label className="flex items-center gap-2 rounded-md border border-slate-200 bg-[linear-gradient(135deg,#ffffff,#f7f5ff)] px-3 py-2 text-sm text-slate-800">
-              <input type="checkbox" {...form.register('useDefaultSource')} />
-              <span>Использовать дефолтный HTML вместо файлов (временно)</span>
-            </label>
-
-            <LLMSelector
-              options={llmOptions.data}
-              value={normalizeLLMSelection(stepOneSelection, llmOptions.data)}
-              onChange={setStepOneSelection}
-              providerLabel="Провайдер для шага 1"
-              modelLabel="Модель для шага 1"
-              disabled={useDefaultSource}
-            />
 
             {submitError ? <p className="text-sm text-red-700">{submitError}</p> : null}
 

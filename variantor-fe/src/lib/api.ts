@@ -48,6 +48,7 @@ export type PipelineContent = {
   parameters?: string;
   variant_html?: string;
   variants_html?: string[];
+  variants_expected?: number;
   answers_by_variant?: string[];
   answers_all?: string;
   selected_variant?: number;
@@ -154,6 +155,11 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ email, password }),
     }),
+  register: (email: string, password: string) =>
+    request<{ user: User }>('/api/auth/register', {
+      method: 'POST',
+      body: JSON.stringify({ email, password }),
+    }),
   logout: () => request<{ ok: boolean }>('/api/auth/logout', { method: 'POST' }),
   me: () => request<{ user: User }>('/api/me'),
   getLLMOptions: () => request<LLMOptions>('/api/llm/options'),
@@ -211,6 +217,7 @@ export const api = {
     ),
   getAssignment: (assignmentId: string) =>
     request<Assignment>(`/api/assignments/${assignmentId}`),
+  listAssignments: () => request<{ assignments: Assignment[] }>('/api/assignments'),
   getExtractionRun: (runId: string) =>
     request<ExtractionRun>(`/api/extraction-runs/${runId}`),
   continueExtractionRun: (runId: string, options?: ExtractionOptions) =>
@@ -229,6 +236,11 @@ export const api = {
   regenerateExtractionStep: (runId: string, step: number, options?: ExtractionOptions) =>
     request<{ extraction_run_id: string; status: string; step: number }>(
       `/api/extraction-runs/${runId}/steps/${step}/regenerate`,
+      { method: 'POST', body: JSON.stringify(options ?? {}) },
+    ),
+  regenerateVariant: (runId: string, variantIndex: number, options?: ExtractionOptions) =>
+    request<{ extraction_run_id: string; status: string; variant_index: number }>(
+      `/api/extraction-runs/${runId}/variants/${variantIndex}/regenerate`,
       { method: 'POST', body: JSON.stringify(options ?? {}) },
     ),
 };

@@ -3,6 +3,7 @@ import type { ReactNode } from 'react';
 import { AppShell } from './components/AppShell';
 import { isUnauthorized, useMe } from './lib/hooks';
 import LoginPage from './pages/LoginPage';
+import GalleryPage from './pages/GalleryPage';
 import NewAssignmentPage from './pages/NewAssignmentPage';
 import ReviewPage from './pages/ReviewPage';
 
@@ -26,6 +27,14 @@ export default function App() {
     <Routes>
       <Route path="/login" element={<LoginPage />} />
       <Route
+        path="/assignments"
+        element={
+          <RequireAuth>
+            <GalleryPage />
+          </RequireAuth>
+        }
+      />
+      <Route
         path="/assignments/new"
         element={
           <RequireAuth>
@@ -41,8 +50,8 @@ export default function App() {
           </RequireAuth>
         }
       />
-      <Route path="/" element={<Navigate to="/assignments/new" replace />} />
-      <Route path="*" element={<Navigate to="/assignments/new" replace />} />
+      <Route path="/" element={<Navigate to="/assignments" replace />} />
+      <Route path="*" element={<Navigate to="/assignments" replace />} />
     </Routes>
   );
 }

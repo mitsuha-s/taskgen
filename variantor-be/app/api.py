@@ -2,7 +2,7 @@ from io import BytesIO
 
 from flask import Blueprint, current_app, jsonify, make_response, request, send_file
 
-from app.auth import AuthService, InvalidCredentials
+from app.auth import AuthService, InvalidCredentials, User
 from app.errors import NotFoundError, ValidationError
 from app.pipeline.service import PipelineService
 
@@ -30,11 +30,20 @@ def auth_service() -> AuthService:
 def require_auth():
     if request.method == "OPTIONS":
         return None
-    if request.endpoint in {"api.login", "api.health", "api.llm_options"}:
+    if request.endpoint in {"api.login", "api.register", "api.health", "api.llm_options"}:
         return None
-    if not auth_service().is_authenticated(request):
+    user = auth_service().current_user(request)
+    if user is None:
         return jsonify({"error": {"code": "unauthorized", "message": "Authentication is required."}}), 401
+    request.current_user = user
     return None
+
+
+def current_user() -> User:
+    user = getattr(request, "current_user", None)
+    if user is None:
+        raise InvalidCredentials()
+    return user
 
 
 @api.get("/health")
@@ -60,6 +69,19 @@ def login():
     return response
 
 
+@api.post("/auth/register")
+def register():
+    payload = request.get_json(silent=True) or {}
+    response = make_response()
+    try:
+        user = auth_service().register(response, payload.get("email", ""), payload.get("password", ""))
+    except InvalidCredentials:
+        return jsonify({"error": {"code": "registration_failed", "message": "Cannot register this email or password."}}), 400
+    response.set_data(jsonify({"user": user.as_dict()}).get_data())
+    response.content_type = "application/json"
+    return response
+
+
 @api.post("/auth/logout")
 def logout():
     response = make_response(jsonify({"ok": True}))
@@ -69,28 +91,33 @@ def logout():
 
 @api.get("/me")
 def me():
-    return jsonify({"user": auth_service().system_user().as_dict()})
+    return jsonify({"user": current_user().as_dict()})
+
+
+@api.get("/assignments")
+def list_assignments():
+    return jsonify({"assignments": service().list_assignments(current_user().id)})
 
 
 @api.post("/assignments")
 def create_assignment():
     payload = request.get_json(silent=True) or {}
-    assignment = service().create_assignment(payload.get("title") or "")
+    assignment = service().create_assignment(payload.get("title") or "", current_user().id)
     return jsonify(assignment), 201
 
 
 @api.get("/assignments/<assignment_id>")
 def get_assignment(assignment_id: str):
-    return jsonify(service().get_assignment(assignment_id))
+    return jsonify(service().get_assignment(assignment_id, current_user().id))
 
 
 @api.post("/assignments/<assignment_id>/image")
 def upload_assignment_image(assignment_id: str):
-    return jsonify(service().save_assignment_image(assignment_id, request.files.get("file")))
+    return jsonify(service().save_assignment_image(assignment_id, request.files.get("file"), current_user().id))
 
 @api.post("/assignments/<assignment_id>/files")
 def upload_assignment_files(assignment_id: str):
-    return jsonify(service().save_assignment_files(assignment_id, request.files.getlist("files")))
+    return jsonify(service().save_assignment_files(assignment_id, request.files.getlist("files"), current_user().id))
 
 @api.post("/files/preview.pdf")
 def preview_file_pdf():
@@ -106,30 +133,36 @@ def preview_file_pdf():
 @api.post("/assignments/<assignment_id>/extract")
 def start_extraction(assignment_id: str):
     payload = request.get_json(silent=True) or {}
-    return jsonify(service().start_extraction(assignment_id, payload)), 202
+    return jsonify(service().start_extraction(assignment_id, payload, current_user().id)), 202
 
 
 @api.get("/extraction-runs/<run_id>")
 def get_extraction_run(run_id: str):
-    return jsonify(service().get_run(run_id))
+    return jsonify(service().get_run(run_id, current_user().id))
 
 
 @api.post("/extraction-runs/<run_id>/continue")
 def continue_extraction_run(run_id: str):
     payload = request.get_json(silent=True) or {}
-    return jsonify(service().continue_run(run_id, payload)), 202
+    return jsonify(service().continue_run(run_id, payload, current_user().id)), 202
 
 
 @api.put("/extraction-runs/<run_id>/steps/<int:step>")
 def update_extraction_step(run_id: str, step: int):
     payload = request.get_json(silent=True) or {}
-    return jsonify(service().update_step(run_id, step, payload.get("content") or ""))
+    return jsonify(service().update_step(run_id, step, payload.get("content") or "", current_user().id))
 
 
 @api.post("/extraction-runs/<run_id>/steps/<int:step>/regenerate")
 def regenerate_extraction_step(run_id: str, step: int):
     payload = request.get_json(silent=True) or {}
-    return jsonify(service().regenerate_step(run_id, step, payload)), 202
+    return jsonify(service().regenerate_step(run_id, step, payload, current_user().id)), 202
+
+
+@api.post("/extraction-runs/<run_id>/variants/<int:variant_index>/regenerate")
+def regenerate_extraction_variant(run_id: str, variant_index: int):
+    payload = request.get_json(silent=True) or {}
+    return jsonify(service().regenerate_variant(run_id, variant_index, payload, current_user().id)), 202
 
 
 @api.get("/files/assignment-images/<image_id>")

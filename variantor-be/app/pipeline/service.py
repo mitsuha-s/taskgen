@@ -29,7 +29,7 @@ EVALUATION_STEP = 4
 SCORE_RE = re.compile(r"\b(10|[1-9])\b")
 TAG_RE = re.compile(r"(?is)<[^>]+>")
 SAFE_MODEL_RE = re.compile(r"^[A-Za-z0-9._:-]+$")
-SUPPORTED_PROVIDERS = {"mock", "gigachat", "openai"}
+SUPPORTED_PROVIDERS = {"openai"}
 PDF_FONT_NAME = "DejaVuSans"
 PDF_FONT_PATHS = (
     "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
@@ -78,26 +78,42 @@ class PipelineService:
             self._providers[selection.provider] = create_provider(self.config, selection.provider)
         return self._providers[selection.provider]
 
-    def create_assignment(self, title: str) -> dict:
+    def create_assignment(self, title: str, user_id: str = "default-user") -> dict:
         with connect() as conn:
             row = conn.execute(
                 """
                 insert into assignments (title, subject, variant_count, status, user_id)
-                values (nullif(%s, ''), 'english', 1, 'created', 'default-user')
+                values (nullif(%s, ''), 'general', 1, 'created', %s)
                 returning *
                 """,
-                (title.strip(),),
+                (title.strip(), user_id),
             ).fetchone()
         return self.assignment_payload(row)
 
-    def get_assignment(self, assignment_id: str) -> dict:
-        assignment = self._assignment_or_404(assignment_id)
+    def list_assignments(self, user_id: str) -> list[dict]:
+        with connect() as conn:
+            rows = conn.execute(
+                """
+                select * from assignments
+                where user_id = %s
+                order by updated_at desc, created_at desc
+                limit 100
+                """,
+                (user_id,),
+            ).fetchall()
+        return [
+            self.assignment_payload(row, latest_run=self._latest_run_for_assignment(str(row["id"])))
+            for row in rows
+        ]
+
+    def get_assignment(self, assignment_id: str, user_id: str = "default-user") -> dict:
+        assignment = self._assignment_or_404(assignment_id, user_id)
         images = self._images_by_assignment_id(assignment_id, missing_ok=True)
         latest_run = self._latest_run_for_assignment(assignment_id)
         return self.assignment_payload(assignment, image=(images[-1] if images else None), images=images, latest_run=latest_run)
 
-    def save_assignment_image(self, assignment_id: str, file: FileStorage | None) -> dict:
-        self._assignment_or_404(assignment_id)
+    def save_assignment_image(self, assignment_id: str, file: FileStorage | None, user_id: str = "default-user") -> dict:
+        self._assignment_or_404(assignment_id, user_id)
         if file is None or not file.filename:
             raise ValidationError("Image file is required.", code="validation_error")
         saved = self._save_file(assignment_id, file)
@@ -119,8 +135,8 @@ class PipelineService:
             "status": "image_uploaded",
         }
 
-    def save_assignment_files(self, assignment_id: str, files: list[FileStorage]) -> dict:
-        self._assignment_or_404(assignment_id)
+    def save_assignment_files(self, assignment_id: str, files: list[FileStorage], user_id: str = "default-user") -> dict:
+        self._assignment_or_404(assignment_id, user_id)
         valid_files = [item for item in files if item and item.filename]
         if not valid_files:
             raise ValidationError("At least one file is required.", code="validation_error")
@@ -165,12 +181,11 @@ class PipelineService:
             return text_to_pdf_bytes(text)
         raise ValidationError("Preview is available only for PDF, DOC and DOCX files.", code="preview_not_supported")
 
-    def start_extraction(self, assignment_id: str, options: dict[str, Any] | None = None) -> dict:
+    def start_extraction(self, assignment_id: str, options: dict[str, Any] | None = None, user_id: str = "default-user") -> dict:
         options = options or {}
-        self._assignment_or_404(assignment_id)
-        use_default_source = bool(options.get("use_default_source"))
-        if not use_default_source:
-            self._images_by_assignment_id(assignment_id)
+        self._assignment_or_404(assignment_id, user_id)
+        use_default_source = False
+        self._images_by_assignment_id(assignment_id)
 
         step_selection = resolve_llm_selection(
             options,
@@ -200,12 +215,12 @@ class PipelineService:
         self._background(self.execute_step, str(run["id"]), 1, step_selection, 1, use_default_source, step_selection)
         return {"extraction_run_id": str(run["id"]), "status": run["status"]}
 
-    def get_run(self, run_id: str) -> dict:
-        return self.run_payload(self._run_or_404(run_id))
+    def get_run(self, run_id: str, user_id: str = "default-user") -> dict:
+        return self.run_payload(self._run_or_404(run_id, user_id))
 
-    def continue_run(self, run_id: str, options: dict[str, Any] | None = None) -> dict:
+    def continue_run(self, run_id: str, options: dict[str, Any] | None = None, user_id: str = "default-user") -> dict:
         options = options or {}
-        run = self._run_or_404(run_id)
+        run = self._run_or_404(run_id, user_id)
         if run["status"] != "awaiting_confirmation" or run["current_step"] >= TOTAL_PIPELINE_STEPS:
             raise PipelineStateError("Pipeline is not waiting for confirmation.", code="pipeline_not_ready")
 
@@ -236,10 +251,10 @@ class PipelineService:
         self._background(self.execute_step, run_id, next_step, step_selection, variant_count, False, evaluation_selection)
         return {"extraction_run_id": run_id, "status": "running", "next_step": next_step}
 
-    def update_step(self, run_id: str, step: int, content: str) -> dict:
+    def update_step(self, run_id: str, step: int, content: str, user_id: str = "default-user") -> dict:
         if step < 1 or step > TOTAL_PIPELINE_STEPS or not content.strip():
             raise ValidationError("Step or content is invalid.", code="invalid_step")
-        run = self._run_or_404(run_id)
+        run = self._run_or_404(run_id, user_id)
         if run["status"] in {"pending", "running"}:
             raise PipelineStateError("Pipeline is not ready for this action.", code="pipeline_not_ready")
 
@@ -284,11 +299,11 @@ class PipelineService:
         )
         return self.run_payload(updated)
 
-    def regenerate_step(self, run_id: str, step: int, options: dict[str, Any] | None = None) -> dict:
+    def regenerate_step(self, run_id: str, step: int, options: dict[str, Any] | None = None, user_id: str = "default-user") -> dict:
         options = options or {}
         if step < 1 or step > TOTAL_PIPELINE_STEPS:
             raise ValidationError("Step is invalid.", code="invalid_step")
-        run = self._run_or_404(run_id)
+        run = self._run_or_404(run_id, user_id)
         if run["status"] in {"pending", "running"}:
             raise PipelineStateError("Pipeline is not ready for this action.", code="pipeline_not_ready")
 
@@ -317,6 +332,27 @@ class PipelineService:
         )
         self._background(self.execute_step, run_id, step, step_selection, 1, False, evaluation_selection)
         return {"extraction_run_id": run_id, "status": "running", "step": step}
+
+    def regenerate_variant(self, run_id: str, variant_index: int, options: dict[str, Any] | None = None, user_id: str = "default-user") -> dict:
+        options = options or {}
+        run = self._run_or_404(run_id, user_id)
+        if run["status"] not in {"succeeded", "running"}:
+            raise PipelineStateError("Pipeline is not ready for variant regeneration.", code="pipeline_not_ready")
+        parsed = run["parsed_content"] or {}
+        variants = list(parsed.get("variants_html") or [])
+        if variant_index < 1 or variant_index > len(variants):
+            raise ValidationError("Variant index is invalid.", code="invalid_variant")
+        selection = resolve_llm_selection(options, provider_key="step_provider", model_key="step_model", config=self.config)
+        evaluation_selection = resolve_llm_selection(
+            options,
+            provider_key="evaluation_provider",
+            model_key="evaluation_model",
+            config=self.config,
+            fallback=selection,
+        )
+        self._mark_step_running(run_id, GENERATION_STEP)
+        self._background(self._regenerate_variant_background, run_id, variant_index, selection, evaluation_selection)
+        return {"extraction_run_id": run_id, "status": "running", "variant_index": variant_index}
 
     def execute_step(
         self,
@@ -395,6 +431,54 @@ class PipelineService:
                 raw_response=response.raw_response,
                 current_step=finished_pipeline_step(step),
                 step_results=results,
+                parsed_content=parsed,
+            )
+        except Exception as exc:
+            self._fail_run(run_id, selection.provider, selection.model, "", str(exc))
+
+    def _regenerate_variant_background(
+        self,
+        run_id: str,
+        variant_index: int,
+        selection: LLMSelection,
+        evaluation_selection: LLMSelection,
+    ) -> None:
+        try:
+            run = self._run_or_404(run_id)
+            results = parse_results(run["step_results"])
+            source_html = result_content(results, "source_html")
+            parameters = result_content(results, "parameters")
+            if not source_html or not parameters:
+                raise PipelineStateError("previous pipeline results are missing")
+            variant = self._generate_single_variant(source_html, parameters, selection)
+            parsed = run["parsed_content"] or {}
+            variants = list(parsed.get("variants_html") or [])
+            variants[variant_index - 1] = variant
+            parsed["variants_html"] = variants
+            parsed["variant_html"] = variants[0] if variants else variant
+            parsed["selected_variant"] = parsed.get("selected_variant") or 1
+            answers_by_variant = list(parsed.get("answers_by_variant") or [])
+            if len(answers_by_variant) < len(variants):
+                answers_by_variant.extend([""] * (len(variants) - len(answers_by_variant)))
+            provider = self._provider(evaluation_selection)
+            answer_prompt = self.prompts.answer_generation_prompt(variant)
+            answer_response = provider.complete_text(answer_prompt, model=evaluation_selection.model or None)
+            answers_by_variant[variant_index - 1] = normalize_llm_text(answer_response.content)
+            parsed["answers_by_variant"] = answers_by_variant
+            parsed["answers_all"] = answers_document(answers_by_variant)
+            generation_result = step_result(GENERATION_STEP, "variant_html", pipeline_step_title(GENERATION_STEP), parsed["variant_html"])
+            next_results = keep_results_before(results, GENERATION_STEP)
+            next_results.append(generation_result)
+            score = result_content(results, "self_score")
+            if score:
+                next_results.append(step_result(EVALUATION_STEP, "self_score", pipeline_step_title(EVALUATION_STEP), score))
+            parsed["steps"] = next_results
+            self._update_run_results(
+                run_id,
+                status="succeeded",
+                assignment_status="processed",
+                current_step=TOTAL_PIPELINE_STEPS,
+                step_results=next_results,
                 parsed_content=parsed,
             )
         except Exception as exc:
@@ -499,41 +583,15 @@ class PipelineService:
             return response, step_result(2, "parameters", pipeline_step_title(2), serialized), [], llm_input
 
         if step == 3:
-            provider = self._provider(selection)
             source_html = result_content(results, "source_html")
             parameters = result_content(results, "parameters")
             if not source_html or not parameters:
                 raise PipelineStateError("previous pipeline results are missing")
-            sections = extract_task_sections(source_html)
-            bundle = parse_parameter_bundle(parameters)
-            tasks = bundle["tasks"]
-            if len(tasks) != len(sections):
-                raise PipelineStateError(f"expected {len(sections)} task parameter sets, got {len(tasks)}")
             full_variants = []
             raw_outputs = []
-            last_response: LLMResponse | None = None
             for variant_index in range(variant_count):
-                generated_tasks = []
-                task_outputs = []
-                for index, section in enumerate(sections):
-                    params = tasks[index]
-                    prompt = self.prompts.generation_prompt(section.html, params, bundle.get("user_comment", ""))
-                    response = provider.complete_text(prompt, model=selection.model or None)
-                    task_html = normalize_llm_text(response.content)
-                    if not self.prompts.is_json_pipeline and not contains_tag(task_html, "h2"):
-                        task_html = ensure_section_heading(section.html, task_html)
-                    generated_tasks.append(task_html)
-                    task_outputs.append(
-                        {
-                            "task_number": params.get("task_number"),
-                            "heading": params.get("heading"),
-                            "content": task_html,
-                            "provider": response.provider,
-                            "model": response.model,
-                        }
-                    )
-                    last_response = response
-                full_variants.append(merge_task_sections(source_html, sections, generated_tasks))
+                variant, task_outputs, last_response = self._generate_single_variant_with_raw(source_html, parameters, selection)
+                full_variants.append(variant)
                 raw_outputs.append({"variant_index": variant_index + 1, "tasks": task_outputs})
             first_variant = full_variants[0]
             response = LLMResponse(
@@ -542,6 +600,9 @@ class PipelineService:
                 provider=(last_response.provider if last_response else "unknown"),
                 model=(last_response.model if last_response else selection.model),
             )
+            bundle = parse_parameter_bundle(parameters)
+            sections = extract_task_sections(source_html)
+            tasks = bundle["tasks"]
             llm_input.update(
                 {
                     "variant_count": variant_count,
@@ -613,6 +674,45 @@ class PipelineService:
         except Exception:
             return response, result, variants, llm_input, eval_result
 
+    def _generate_single_variant(self, source_html: str, parameters: str, selection: LLMSelection) -> str:
+        variant, _, _ = self._generate_single_variant_with_raw(source_html, parameters, selection)
+        return variant
+
+    def _generate_single_variant_with_raw(
+        self,
+        source_html: str,
+        parameters: str,
+        selection: LLMSelection,
+    ) -> tuple[str, list[dict], LLMResponse | None]:
+        provider = self._provider(selection)
+        sections = extract_task_sections(source_html)
+        bundle = parse_parameter_bundle(parameters)
+        tasks = bundle["tasks"]
+        if len(tasks) != len(sections):
+            raise PipelineStateError(f"expected {len(sections)} task parameter sets, got {len(tasks)}")
+        generated_tasks = []
+        task_outputs = []
+        last_response: LLMResponse | None = None
+        for index, section in enumerate(sections):
+            params = tasks[index]
+            prompt = self.prompts.generation_prompt(section.html, params, bundle.get("user_comment", ""))
+            response = provider.complete_text(prompt, model=selection.model or None)
+            task_html = normalize_llm_text(response.content)
+            if not self.prompts.is_json_pipeline and not contains_tag(task_html, "h2"):
+                task_html = ensure_section_heading(section.html, task_html)
+            generated_tasks.append(task_html)
+            task_outputs.append(
+                {
+                    "task_number": params.get("task_number"),
+                    "heading": params.get("heading"),
+                    "content": task_html,
+                    "provider": response.provider,
+                    "model": response.model,
+                }
+            )
+            last_response = response
+        return merge_task_sections(source_html, sections, generated_tasks), task_outputs, last_response
+
     def _evaluate_variant(
         self,
         run: dict,
@@ -648,22 +748,31 @@ class PipelineService:
             response = provider.complete_text(prompt, model=selection.model or None)
             answers_by_variant.append(normalize_llm_text(response.content))
 
-        all_answers = "\n".join(
-            f"<section><h2>Ответы к варианту {index + 1}</h2>{answers}</section>"
-            for index, answers in enumerate(answers_by_variant)
-        )
-        return answers_by_variant, all_answers
+        return answers_by_variant, answers_document(answers_by_variant)
 
-    def _assignment_or_404(self, assignment_id: str) -> dict:
+    def _assignment_or_404(self, assignment_id: str, user_id: str | None = None) -> dict:
         with connect() as conn:
-            row = conn.execute("select * from assignments where id = %s", (assignment_id,)).fetchone()
+            if user_id is None:
+                row = conn.execute("select * from assignments where id = %s", (assignment_id,)).fetchone()
+            else:
+                row = conn.execute("select * from assignments where id = %s and user_id = %s", (assignment_id, user_id)).fetchone()
         if row is None:
             raise NotFoundError("Assignment was not found.", code="assignment_not_found")
         return row
 
-    def _run_or_404(self, run_id: str) -> dict:
+    def _run_or_404(self, run_id: str, user_id: str | None = None) -> dict:
         with connect() as conn:
-            row = conn.execute("select * from extraction_runs where id = %s", (run_id,)).fetchone()
+            if user_id is None:
+                row = conn.execute("select * from extraction_runs where id = %s", (run_id,)).fetchone()
+            else:
+                row = conn.execute(
+                    """
+                    select er.* from extraction_runs er
+                    join assignments a on a.id = er.assignment_id
+                    where er.id = %s and a.user_id = %s
+                    """,
+                    (run_id, user_id),
+                ).fetchone()
         if row is None:
             raise NotFoundError("Extraction run was not found.", code="extraction_not_found")
         return row
@@ -1177,23 +1286,6 @@ def escape_html(value: str) -> str:
 def provider_options(config: Config) -> list[dict]:
     return [
         {
-            "id": "mock",
-            "label": "Mock",
-            "configured": True,
-            "default_model": "mock",
-            "models": [{"id": "mock", "label": "Mock"}],
-        },
-        {
-            "id": "gigachat",
-            "label": "GigaChat",
-            "configured": bool(config.GIGACHAT_AUTH_KEY),
-            "default_model": config.GIGACHAT_MODEL or "GigaChat-Pro",
-            "models": [
-                {"id": "GigaChat-Pro", "label": "GigaChat Pro"},
-                {"id": "GigaChat-2", "label": "GigaChat 2"},
-            ],
-        },
-        {
             "id": "openai",
             "label": "OpenAI",
             "configured": bool(config.OPENAI_API_KEY),
@@ -1215,23 +1307,17 @@ def resolve_llm_selection(
     config: Config,
     fallback: LLMSelection | None = None,
 ) -> LLMSelection:
-    fallback_provider = fallback.provider if fallback else config.LLM_PROVIDER
-    provider = str(options.get(provider_key) or fallback_provider or "mock").strip().lower()
+    provider = "openai"
     if provider not in SUPPORTED_PROVIDERS:
         raise ValidationError("LLM provider is not supported.", code="invalid_llm_provider")
 
-    fallback_model = fallback.model if fallback else default_model_for_provider(provider, config)
-    raw_model = str(options.get(model_key) or "").strip()
-    model = resolve_model_for_provider(raw_model, provider, config, fallback_model)
-    return LLMSelection(provider=provider, model=model)
+    return LLMSelection(provider=provider, model=config.OPENAI_MODEL or "gpt-5.4")
 
 
 def default_model_for_provider(provider: str, config: Config) -> str:
-    if provider == "gigachat":
-        return config.GIGACHAT_MODEL or "GigaChat-Pro"
     if provider == "openai":
         return config.OPENAI_MODEL or "gpt-5.4"
-    return "mock"
+    return config.OPENAI_MODEL or "gpt-5.4"
 
 
 def resolve_model_for_provider(option: str, provider: str, config: Config, fallback_model: str = "") -> str:
@@ -1241,17 +1327,9 @@ def resolve_model_for_provider(option: str, provider: str, config: Config, fallb
         return fallback_model or default_model_for_provider(provider, config)
 
     aliases = {
-        "gigachat": {
-            "pro": config.GIGACHAT_MODEL or "GigaChat-Pro",
-            "lite": "GigaChat-2",
-        },
         "openai": {
             "pro": config.OPENAI_MODEL or "gpt-5.4",
             "lite": "gpt-5.4-mini",
-        },
-        "mock": {
-            "pro": "mock",
-            "lite": "mock",
         },
     }
     if selected_lower in aliases.get(provider, {}):
@@ -1307,6 +1385,14 @@ def build_pipeline_content(results: list[dict]) -> dict:
     }
 
 
+def answers_document(answers_by_variant: list[str]) -> str:
+    return "\n".join(
+        f"<section><h2>Ответы к варианту {index + 1}</h2>{answers}</section>"
+        for index, answers in enumerate(answers_by_variant)
+        if answers.strip()
+    )
+
+
 def step_result(step: int, key: str, title: str, content: str) -> dict:
     from datetime import datetime, timezone
 
@@ -1333,7 +1419,7 @@ def normalize_llm_text(content: str) -> str:
 
 def parse_task_parameters(content: str) -> dict:
     return {
-        "task_type": extract_labeled_value(content, "Тип задания"),
+        "task_type": normalize_task_type(extract_labeled_value(content, "Тип задания")),
         "subject": extract_labeled_value(content, "Предмет"),
         "school_class": extract_labeled_value(content, "Предполагаемый класс"),
         "difficulty": extract_labeled_value(content, "Уровень сложности задания"),
@@ -1372,7 +1458,7 @@ def extract_task_sections(source_html: str) -> list[TaskSection]:
             sections.append(
                 TaskSection(
                     number=index + 1,
-                    heading=str(task.get("title") or f"Задание {index + 1}"),
+                    heading=clean_plain_text(str(task.get("title") or f"Задание {index + 1}")),
                     html=task_json,
                     start=index,
                     end=index + 1,
@@ -1427,7 +1513,62 @@ def extract_task_heading(section_html: str) -> str:
     close_index = lower.find("</h2>", open_end + 1)
     if close_index < 0:
         return ""
-    return TAG_RE.sub(" ", section_html[open_end + 1 : close_index]).strip()
+    return clean_plain_text(section_html[open_end + 1 : close_index])
+
+
+def clean_plain_text(value: str) -> str:
+    text = re.sub(r"(?is)&(?:amp;)?lt;/?p(?:\s+[^&]*)?&(?:amp;)?gt;", " ", value)
+    text = TAG_RE.sub(" ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def normalize_task_type(value: str) -> str:
+    text = clean_plain_text(value)
+    lower = text.lower()
+    if not text or text == "*":
+        return "*"
+    allowed = {
+        "Тест с выбором ответа",
+        "Краткий ответ",
+        "Развернутый ответ",
+        "Решение задачи",
+        "Доказательство",
+        "Сопоставление",
+        "Установление последовательности",
+        "Заполнение пропусков",
+        "Работа с текстом",
+        "Работа с таблицей",
+        "Работа с графиком или диаграммой",
+        "Практическая работа",
+        "Лабораторная работа",
+        "Творческое задание",
+        "Эссе / сочинение",
+        "Перевод",
+        "Диалог / интервью",
+        "Кроссворд / игровые задания",
+        "Другое",
+    }
+    if text in allowed:
+        return text
+    if any(marker in lower for marker in ("multiple choice", "множественный выбор", "альтернативный выбор", "true/false")):
+        return "Тест с выбором ответа"
+    if any(marker in lower for marker in ("matching", "перекрестный выбор", "сопостав")):
+        return "Сопоставление"
+    if any(marker in lower for marker in ("rearrangement", "упорядоч")):
+        return "Установление последовательности"
+    if any(marker in lower for marker in ("completion", "заполнение пропуск", "transformation", "трансформац")):
+        return "Заполнение пропусков"
+    if any(marker in lower for marker in ("answering questions", "ответ на вопрос")):
+        return "Краткий ответ"
+    if "translation" in lower or "перевод" in lower:
+        return "Перевод"
+    if any(marker in lower for marker in ("dialogue", "interview", "диалог", "интервью")):
+        return "Диалог / интервью"
+    if "discussion" in lower:
+        return "Развернутый ответ"
+    if any(marker in lower for marker in ("letter", "essay", "пись", "эссе", "сочинен")):
+        return "Эссе / сочинение"
+    return "*"
 
 
 def merge_task_sections(source_html: str, sections: list[TaskSection], replacements: list[str]) -> str:
@@ -1499,7 +1640,7 @@ def pipeline_step_key(step: int) -> str:
 
 def pipeline_step_title(step: int) -> str:
     return {
-        1: "HTML исходного задания",
+        1: "Исходный вариант",
         2: "Параметры задания",
         3: "Новый вариант задания (HTML)",
         4: "Самооценка результата",

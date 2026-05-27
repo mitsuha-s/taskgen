@@ -1,8 +1,9 @@
-import { BookOpenCheck, LogOut, Plus } from 'lucide-react';
+import { BookOpenCheck, Eye, Images, LogOut, Moon, Plus, Sun } from 'lucide-react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { Link, useNavigate } from 'react-router-dom';
 import type { ReactNode } from 'react';
 import { api } from '../lib/api';
+import { usePreferences } from '../lib/preferences';
 
 type AppShellProps = {
   children: ReactNode;
@@ -11,6 +12,7 @@ type AppShellProps = {
 export function AppShell({ children }: AppShellProps) {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  const preferences = usePreferences();
   const logout = useMutation({
     mutationFn: api.logout,
     onSettled: async () => {
@@ -33,10 +35,22 @@ export function AppShell({ children }: AppShellProps) {
             </span>
           </Link>
           <div className="flex items-center gap-2">
+            <Link className="btn-secondary h-9 px-3" to="/assignments">
+              <Images className="h-4 w-4" aria-hidden="true" />
+              <span className="hidden sm:inline">Галерея</span>
+            </Link>
             <Link className="btn-secondary h-9 px-3" to="/assignments/new">
               <Plus className="h-4 w-4" aria-hidden="true" />
               <span className="hidden sm:inline">Новое</span>
             </Link>
+            <button className="btn-secondary h-9 px-3" onClick={preferences.toggleTheme} type="button" title="Переключить тему">
+              {preferences.theme === 'dark' ? <Sun className="h-4 w-4" aria-hidden="true" /> : <Moon className="h-4 w-4" aria-hidden="true" />}
+              <span className="hidden lg:inline">{preferences.theme === 'dark' ? 'Светлая' : 'Темная'}</span>
+            </button>
+            <button className="btn-secondary h-9 px-3" onClick={preferences.toggleAccessible} type="button" title="Режим для слабовидящих">
+              <Eye className="h-4 w-4" aria-hidden="true" />
+              <span className="hidden lg:inline">Доступность</span>
+            </button>
             <button className="btn-secondary h-9 px-3" onClick={() => logout.mutate()} type="button">
               <LogOut className="h-4 w-4" aria-hidden="true" />
               <span className="hidden sm:inline">Выйти</span>

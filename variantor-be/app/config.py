@@ -42,7 +42,7 @@ class Config:
         if item.strip()
     ]
 
-    LLM_PROVIDER = os.getenv("LLM_PROVIDER", "openai").strip().lower()
+    LLM_PROVIDER = "openai"
     GIGACHAT_AUTH_KEY = os.getenv("GIGACHAT_AUTH_KEY", "")
     GIGACHAT_MODEL = os.getenv("GIGACHAT_MODEL", "GigaChat-Pro")
     GIGACHAT_TEXT_MODEL = os.getenv("GIGACHAT_TEXT_MODEL", "")

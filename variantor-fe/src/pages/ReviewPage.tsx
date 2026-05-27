@@ -2,9 +2,8 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { AlertCircle, ArrowRight, CheckCircle2, Download, FileText, Loader2, RotateCcw, Save } from 'lucide-react';
 import { useRef, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { LLMSelector } from '../components/LLMSelector';
-import { api, ExtractionOptions, LLMOptions, LLMSelection, PipelineStepResult, userMessage } from '../lib/api';
-import { defaultLLMSelection, normalizeLLMSelection } from '../lib/llm';
+import { api, ExtractionOptions, PipelineStepResult, userMessage } from '../lib/api';
+import { renderMathMarkers } from '../lib/math';
 
 const totalSteps = 4;
 
@@ -14,13 +13,7 @@ export default function ReviewPage() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const runId = searchParams.get('run');
-  const [stepSelections, setStepSelections] = useState<Record<number, LLMSelection>>({});
   const [variantCount, setVariantCount] = useState(3);
-
-  const llmOptions = useQuery({
-    queryKey: ['llm-options'],
-    queryFn: api.getLLMOptions,
-  });
 
   const assignment = useQuery({
     queryKey: ['assignment', id],
@@ -66,6 +59,12 @@ export default function ReviewPage() {
       await queryClient.invalidateQueries({ queryKey: ['extraction-run', runId] });
     },
   });
+  const regenerateVariant = useMutation({
+    mutationFn: (variantIndex: number) => api.regenerateVariant(runId!, variantIndex),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ['extraction-run', runId] });
+    },
+  });
 
   const data = run.data;
   const steps = data?.parsed_content?.steps ?? data?.step_results ?? [];
@@ -77,27 +76,9 @@ export default function ReviewPage() {
   const selectedVariant = data?.parsed_content?.selected_variant ?? 1;
   const isRunning = data?.status === 'pending' || data?.status === 'running' || run.isLoading;
   const canContinue = data?.status === 'awaiting_confirmation' && data.current_step < totalSteps;
-  const defaultSelection = defaultLLMSelection(llmOptions.data);
-  const selectionForStep = (step: number) => normalizeLLMSelection(stepSelections[step] ?? defaultSelection, llmOptions.data);
-  const updateStepSelection = (step: number, selection: LLMSelection) =>
-    setStepSelections((current) => ({ ...current, [step]: normalizeLLMSelection(selection, llmOptions.data) }));
-  const stepOptions = (step: number): ExtractionOptions => {
-    const selection = selectionForStep(step);
-    return {
-      step_provider: selection.provider,
-      step_model: selection.model,
-    };
-  };
+  const stepOptions = (_step: number): ExtractionOptions => ({});
   const generationOptions = (): ExtractionOptions => {
-    const generationSelection = selectionForStep(3);
-    const evaluationSelection = selectionForStep(4);
     return {
-      step_provider: generationSelection.provider,
-      step_model: generationSelection.model,
-      final_provider: generationSelection.provider,
-      final_model: generationSelection.model,
-      evaluation_provider: evaluationSelection.provider,
-      evaluation_model: evaluationSelection.model,
       variant_count: variantCount,
     };
   };
@@ -119,7 +100,7 @@ export default function ReviewPage() {
               <FileText className="h-5 w-5" aria-hidden="true" />
             </span>
             <div>
-              <h1 className="text-2xl font-bold tracking-tight text-ink">Пайплайн обработки задания</h1>
+              <h1 className="text-2xl font-bold tracking-tight text-ink">Обработка задания</h1>
               <p className="mt-1 text-sm text-slate-600">{assignment.data?.title || 'Эталонное задание'}</p>
             </div>
           </div>
@@ -148,7 +129,7 @@ export default function ReviewPage() {
                 steps={steps}
                 currentStep={data?.current_step ?? 1}
                 canEdit={data?.status === 'awaiting_confirmation' || data?.status === 'succeeded'}
-                processing={updateStep.isPending || continueRun.isPending || regenerateStep.isPending || llmOptions.isLoading}
+                processing={updateStep.isPending || continueRun.isPending || regenerateStep.isPending}
                 onSave={(step, content) => updateStep.mutateAsync({ step, content })}
                 onSaveAndContinue={async (step, content) => {
                   await updateStep.mutateAsync({ step, content });
@@ -157,10 +138,6 @@ export default function ReviewPage() {
                     ...(nextStep === 3 ? generationOptions() : stepOptions(nextStep)),
                   });
                 }}
-                llmOptions={llmOptions.data}
-                stepSelections={stepSelections}
-                defaultSelection={defaultSelection}
-                onStepSelectionChange={updateStepSelection}
                 variantCount={variantCount}
                 onVariantCountChange={setVariantCount}
                 onRegenerate={(step) => regenerateStep.mutate({ step, options: step === 3 ? generationOptions() : stepOptions(step) })}
@@ -177,15 +154,12 @@ export default function ReviewPage() {
             {canContinue ? (
               <ContinueState
                 step={data.current_step}
-                nextStepSelection={selectionForStep((data.current_step ?? 1) + 1)}
-                llmOptions={llmOptions.data}
-                onNextStepSelectionChange={(value) => updateStepSelection((data.current_step ?? 1) + 1, value)}
                 onContinue={() =>
                   continueRun.mutate({
                     ...(data.current_step + 1 === 3 ? generationOptions() : stepOptions((data.current_step ?? 1) + 1)),
                   })
                 }
-                processing={continueRun.isPending || llmOptions.isLoading}
+                processing={continueRun.isPending}
                 hidden={data.current_step === 2}
               />
             ) : null}
@@ -198,6 +172,8 @@ export default function ReviewPage() {
                   answersByVariant={variantAnswers}
                   answersAll={allAnswers}
                   selectedVariant={selectedVariant}
+                  processing={isRunning || regenerateVariant.isPending}
+                  onRegenerateVariant={(index) => regenerateVariant.mutate(index)}
                   onAcceptVariant={async (variant) => {
                     await updateStep.mutateAsync({ step: 3, content: variant });
                   }}
@@ -219,10 +195,6 @@ function PipelineResults({
   processing,
   onSave,
   onSaveAndContinue,
-  llmOptions,
-  stepSelections,
-  defaultSelection,
-  onStepSelectionChange,
   variantCount,
   onVariantCountChange,
   onRegenerate,
@@ -233,10 +205,6 @@ function PipelineResults({
   processing: boolean;
   onSave: (step: number, content: string) => Promise<unknown>;
   onSaveAndContinue: (step: number, content: string) => Promise<unknown>;
-  llmOptions?: LLMOptions;
-  stepSelections: Record<number, LLMSelection>;
-  defaultSelection: LLMSelection;
-  onStepSelectionChange: (step: number, value: LLMSelection) => void;
   variantCount: number;
   onVariantCountChange: (value: number) => void;
   onRegenerate: (step: number) => void;
@@ -265,11 +233,6 @@ function PipelineResults({
               <ParameterEditor
                 content={step.content}
                 processing={processing}
-                llmOptions={llmOptions}
-                generationSelection={normalizeLLMSelection(stepSelections[3] ?? defaultSelection, llmOptions)}
-                evaluationSelection={normalizeLLMSelection(stepSelections[4] ?? defaultSelection, llmOptions)}
-                onGenerationSelectionChange={(value) => onStepSelectionChange(3, value)}
-                onEvaluationSelectionChange={(value) => onStepSelectionChange(4, value)}
                 variantCount={variantCount}
                 onVariantCountChange={onVariantCountChange}
                 onSave={(content) => onSave(step.step, content)}
@@ -314,7 +277,7 @@ function StepContentView({ step }: { step: PipelineStepResult }) {
   );
 }
 
-const taskTypeOptions = ['*', 'Множественный выбор (Multiple choice)', 'Альтернативный выбор (True/False)', 'Перекрестный выбор (Matching)', 'Упорядочение (Rearrangement)', 'Заполнение пропусков (Completion)', 'Вставка слова в нужной форме / Трансформация (Transformation)', 'Ответ на вопрос (Answering questions)', 'Перевод (Translation)', 'Диалог / Интервью (Dialogue / Interview)', 'Обсуждение (Discussion)', 'Написание письма / эссе (Letter / Essay writing)', 'Имитация / Кроссворд / языковые игры (Crossword / Language games)'];
+const taskTypeOptions = ['*', 'Тест с выбором ответа', 'Краткий ответ', 'Развернутый ответ', 'Решение задачи', 'Доказательство', 'Сопоставление', 'Установление последовательности', 'Заполнение пропусков', 'Работа с текстом', 'Работа с таблицей', 'Работа с графиком или диаграммой', 'Практическая работа', 'Лабораторная работа', 'Творческое задание', 'Эссе / сочинение', 'Перевод', 'Диалог / интервью', 'Кроссворд / игровые задания', 'Другое'];
 const subjectOptions = ['*', 'Английский язык', 'Русский язык', 'Литература', 'Математика', 'Алгебра', 'Геометрия', 'Информатика', 'Физика', 'Химия', 'Биология', 'История', 'Обществознание', 'География', 'Иностранный язык', 'Другое'];
 const classOptions = ['*', ...Array.from({ length: 11 }, (_, index) => String(index + 1))];
 const difficultyOptions = ['*', ...Array.from({ length: 10 }, (_, index) => String(index + 1))];
@@ -369,11 +332,6 @@ function TaskParametersView({ content }: { content: string }) {
 function ParameterEditor({
   content,
   processing,
-  llmOptions,
-  generationSelection,
-  evaluationSelection,
-  onGenerationSelectionChange,
-  onEvaluationSelectionChange,
   variantCount,
   onVariantCountChange,
   onSave,
@@ -381,11 +339,6 @@ function ParameterEditor({
 }: {
   content: string;
   processing: boolean;
-  llmOptions?: LLMOptions;
-  generationSelection: LLMSelection;
-  evaluationSelection: LLMSelection;
-  onGenerationSelectionChange: (value: LLMSelection) => void;
-  onEvaluationSelectionChange: (value: LLMSelection) => void;
   variantCount: number;
   onVariantCountChange: (value: number) => void;
   onSave: (content: string) => Promise<unknown>;
@@ -432,37 +385,19 @@ function ParameterEditor({
           placeholder="Например: сохранить количество пунктов и формат вариантов ответов"
         />
       </div>
-      <div className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_180px]">
-        <LLMSelector
-          options={llmOptions}
-          value={generationSelection}
-          onChange={onGenerationSelectionChange}
-          providerLabel="Провайдер для шага 3"
-          modelLabel="Модель для шага 3"
-          disabled={processing}
-        />
-        <div className="space-y-1.5">
-          <label className="label" htmlFor="variant-count">Количество новых вариантов (1-10)</label>
-          <select
-            id="variant-count"
-            className="field"
-            value={variantCount}
-            onChange={(event) => onVariantCountChange(Number(event.target.value))}
-          >
-            {Array.from({ length: 10 }, (_, index) => index + 1).map((count) => (
-              <option key={count} value={count}>{count}</option>
-            ))}
-          </select>
-        </div>
+      <div className="max-w-48 space-y-1.5">
+        <label className="label" htmlFor="variant-count">Количество новых вариантов (1-10)</label>
+        <select
+          id="variant-count"
+          className="field"
+          value={variantCount}
+          onChange={(event) => onVariantCountChange(Number(event.target.value))}
+        >
+          {Array.from({ length: 10 }, (_, index) => index + 1).map((count) => (
+            <option key={count} value={count}>{count}</option>
+          ))}
+        </select>
       </div>
-      <LLMSelector
-        options={llmOptions}
-        value={evaluationSelection}
-        onChange={onEvaluationSelectionChange}
-        providerLabel="Провайдер для самооценки"
-        modelLabel="Модель для самооценки"
-        disabled={processing}
-      />
       <EditorActions processing={processing} onSave={() => onSave(value)} onSaveAndContinue={() => onSaveAndContinue(value)} />
     </div>
   );
@@ -507,17 +442,11 @@ function RunningState({ step }: { step: number }) {
 
 function ContinueState({
   step,
-  nextStepSelection,
-  llmOptions,
-  onNextStepSelectionChange,
   onContinue,
   processing,
   hidden,
 }: {
   step: number;
-  nextStepSelection: LLMSelection;
-  llmOptions?: LLMOptions;
-  onNextStepSelectionChange: (value: LLMSelection) => void;
   onContinue: () => void;
   processing: boolean;
   hidden?: boolean;
@@ -528,14 +457,6 @@ function ContinueState({
   return (
     <div className="space-y-3 rounded-lg border border-honey/50 bg-[linear-gradient(135deg,#fff7ed,#fffbe8)] p-4 text-sm text-amber-950">
       <div className="font-medium">Шаг {step} завершен. Проверьте промежуточный результат перед продолжением.</div>
-      <LLMSelector
-        options={llmOptions}
-        value={nextStepSelection}
-        onChange={onNextStepSelectionChange}
-        providerLabel="Провайдер для следующего шага"
-        modelLabel="Модель для следующего шага"
-        disabled={processing}
-      />
       <button className="btn-primary" disabled={processing} onClick={onContinue} type="button">
         {processing ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" /> : <ArrowRight className="h-4 w-4" aria-hidden="true" />}
         Продолжить обработку
@@ -561,6 +482,8 @@ function FinalDocumentCard({
   answersByVariant,
   answersAll,
   selectedVariant,
+  processing,
+  onRegenerateVariant,
   onAcceptVariant,
   title,
 }: {
@@ -569,6 +492,8 @@ function FinalDocumentCard({
   answersByVariant: string[];
   answersAll: string;
   selectedVariant: number;
+  processing: boolean;
+  onRegenerateVariant: (variantIndex: number) => void;
   onAcceptVariant: (variant: string) => Promise<unknown>;
   title: string;
 }) {
@@ -757,7 +682,13 @@ function FinalDocumentCard({
           </div>
         </article>
         <article className="overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm">
-          <div className="section-title">Новый вариант {activeIndex + 1}</div>
+          <div className="section-title flex items-center justify-between gap-3">
+            <span>Новый вариант {activeIndex + 1}</span>
+            <button className="btn-secondary h-8 px-2 text-xs" disabled={processing} type="button" onClick={() => onRegenerateVariant(activeIndex + 1)}>
+              {processing ? <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" /> : <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />}
+              Перегенерировать
+            </button>
+          </div>
           <div className="max-h-[640px] overflow-auto px-5 py-4 text-sm">
             <HTMLDocument html={activeVariant} />
           </div>
@@ -799,7 +730,7 @@ function FinalDocumentCard({
 }
 
 function HTMLDocument({ html }: { html: string }) {
-  const rendered = jsonPipelineDocumentToHTML(html) ?? html;
+  const rendered = stripVisibleParagraphTags(renderMathMarkers(jsonPipelineDocumentToHTML(html) ?? html));
   return (
     <div className="document-html max-w-none" dangerouslySetInnerHTML={{ __html: rendered }} />
   );
@@ -813,13 +744,35 @@ function jsonPipelineDocumentToHTML(value: string) {
       return null;
     }
     return tasks.map((task, index) => {
-      const title = task.title?.trim() || `Задание ${index + 1}`;
-      const text = task.text?.trim() || '';
+      const title = cleanPlainText(task.title || '') || `Задание ${index + 1}`;
+      const text = stripTaskHeadings(task.text?.trim() || '');
       return `<section><h2>${escapeHTML(title)}</h2>${text}</section>`;
     }).join('');
   } catch {
     return null;
   }
+}
+
+function stripTaskHeadings(value: string) {
+  return value
+    .replace(/<h2\b[^>]*>[\s\S]*?<\/h2>/gi, '')
+    .replace(/&lt;h2\b[^&]*&gt;[\s\S]*?&lt;\/h2&gt;/gi, '')
+    .trim();
+}
+
+function stripVisibleParagraphTags(value: string) {
+  return value
+    .replace(/&lt;\/?p&gt;/gi, '')
+    .replace(/&amp;lt;\/?p&amp;gt;/gi, '')
+    .replace(/<\/p>\s*<\/p>/gi, '</p>');
+}
+
+function cleanPlainText(value: string) {
+  const element = document.createElement('div');
+  element.innerHTML = value;
+  return (element.textContent || element.innerText || value)
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 function escapeHTML(value: string) {
@@ -864,7 +817,7 @@ function parseParameters(content: string) {
       tasks: Array.isArray(parsed.tasks) && parsed.tasks.length > 0
         ? parsed.tasks.map((task, index) => ({
             task_number: task.task_number ?? index + 1,
-            heading: task.heading ?? `Задание ${index + 1}`,
+            heading: cleanPlainText(task.heading ?? `Задание ${index + 1}`),
             task_type: normalizeTaskType(task.task_type ?? '*'),
             subject: normalizeSubject(task.subject ?? parsed.subject ?? '*'),
             school_class: normalizeOption(task.school_class ?? '*', classOptions),
@@ -891,11 +844,37 @@ function normalizeOption(value: string, options: string[]) {
 }
 
 function normalizeTaskType(value: string) {
-  if (taskTypeOptions.includes(value)) {
-    return value;
+  const normalized = cleanPlainText(value);
+  if (taskTypeOptions.includes(normalized)) {
+    return normalized;
   }
-  if (value === 'Множественный выбор (Multiple choicef)') {
-    return 'Множественный выбор (Multiple choice)';
+  const lower = normalized.toLowerCase();
+  if (lower.includes('multiple choice') || lower.includes('множественный выбор') || lower.includes('альтернативный выбор') || lower.includes('true/false')) {
+    return 'Тест с выбором ответа';
+  }
+  if (lower.includes('matching') || lower.includes('перекрестный выбор') || lower.includes('сопостав')) {
+    return 'Сопоставление';
+  }
+  if (lower.includes('rearrangement') || lower.includes('упорядоч')) {
+    return 'Установление последовательности';
+  }
+  if (lower.includes('completion') || lower.includes('заполнение пропуск') || lower.includes('transformation') || lower.includes('трансформац')) {
+    return 'Заполнение пропусков';
+  }
+  if (lower.includes('answering questions') || lower.includes('ответ на вопрос')) {
+    return 'Краткий ответ';
+  }
+  if (lower.includes('translation') || lower.includes('перевод')) {
+    return 'Перевод';
+  }
+  if (lower.includes('dialogue') || lower.includes('interview') || lower.includes('диалог') || lower.includes('интервью')) {
+    return 'Диалог / интервью';
+  }
+  if (lower.includes('discussion')) {
+    return 'Развернутый ответ';
+  }
+  if (lower.includes('letter') || lower.includes('essay') || lower.includes('пись') || lower.includes('эссе') || lower.includes('сочинен')) {
+    return 'Эссе / сочинение';
   }
   return '*';
 }
