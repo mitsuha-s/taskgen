@@ -26,6 +26,7 @@ from app.pipeline.prompts import PromptSet
 TOTAL_PIPELINE_STEPS = 4
 GENERATION_STEP = 3
 EVALUATION_STEP = 4
+GENERATION_COOLDOWN_SECONDS = 5 * 60
 SCORE_RE = re.compile(r"\b(10|[1-9])\b")
 TAG_RE = re.compile(r"(?is)<[^>]+>")
 SAFE_MODEL_RE = re.compile(r"^[A-Za-z0-9._:-]+$")
@@ -89,6 +90,24 @@ class PipelineService:
                 (title.strip(), user_id),
             ).fetchone()
         return self.assignment_payload(row)
+
+    def update_assignment_title(self, assignment_id: str, title: str, user_id: str = "default-user") -> dict:
+        self._assignment_or_404(assignment_id, user_id)
+        clean_title = title.strip()[:160]
+        with connect() as conn:
+            row = conn.execute(
+                """
+                update assignments
+                set title = nullif(%s, ''), updated_at = now()
+                where id = %s and user_id = %s
+                returning *
+                """,
+                (clean_title, assignment_id, user_id),
+            ).fetchone()
+        if row is None:
+            raise NotFoundError("Assignment was not found.", code="assignment_not_found")
+        latest_run = self._latest_run_for_assignment(assignment_id)
+        return self.assignment_payload(row, latest_run=latest_run)
 
     def list_assignments(self, user_id: str) -> list[dict]:
         with connect() as conn:
@@ -183,9 +202,12 @@ class PipelineService:
 
     def start_extraction(self, assignment_id: str, options: dict[str, Any] | None = None, user_id: str = "default-user") -> dict:
         options = options or {}
-        self._assignment_or_404(assignment_id, user_id)
+        assignment = self._assignment_or_404(assignment_id, user_id)
         use_default_source = False
-        self._images_by_assignment_id(assignment_id)
+        manual_source_text = str(options.get("manual_source_text") or "").strip()
+        if not manual_source_text:
+            self._images_by_assignment_id(assignment_id)
+        self._ensure_generation_cooldown_elapsed(user_id)
 
         step_selection = resolve_llm_selection(
             options,
@@ -200,7 +222,7 @@ class PipelineService:
                     assignment_id, status, current_step, provider, model, prompt_version,
                     step_results, parsed_content, warnings
                 )
-                values (%s, 'pending', 1, %s, %s, %s, '[]'::jsonb, null, '[]'::jsonb)
+                values (%s, 'pending', 1, %s, %s, %s, '[]'::jsonb, %s::jsonb, '[]'::jsonb)
                 returning *
                 """,
                 (
@@ -208,6 +230,12 @@ class PipelineService:
                     step_selection.provider,
                     step_selection.model,
                     self.prompts.version,
+                    json_dumps(
+                        {
+                            "manual_source_text": manual_source_text,
+                            "needs_generated_title": not (assignment.get("title") or "").strip(),
+                        }
+                    ),
                 ),
             ).fetchone()
             conn.execute("update assignments set status = 'extracting', updated_at = now() where id = %s", (assignment_id,))
@@ -247,6 +275,8 @@ class PipelineService:
             fallback=step_selection,
         )
         variant_count = resolve_variant_count(options.get("variant_count"))
+        if next_step == GENERATION_STEP:
+            self._ensure_generation_cooldown_elapsed(user_id)
         self._mark_step_running(run_id, next_step)
         self._background(self.execute_step, run_id, next_step, step_selection, variant_count, False, evaluation_selection)
         return {"extraction_run_id": run_id, "status": "running", "next_step": next_step}
@@ -257,6 +287,8 @@ class PipelineService:
         run = self._run_or_404(run_id, user_id)
         if run["status"] in {"pending", "running"}:
             raise PipelineStateError("Pipeline is not ready for this action.", code="pipeline_not_ready")
+        if step == GENERATION_STEP:
+            self._ensure_generation_cooldown_elapsed(user_id)
 
         previous_results = parse_results(run["step_results"])
         results = keep_results_before(previous_results, step)
@@ -353,6 +385,39 @@ class PipelineService:
         self._mark_step_running(run_id, GENERATION_STEP)
         self._background(self._regenerate_variant_background, run_id, variant_index, selection, evaluation_selection)
         return {"extraction_run_id": run_id, "status": "running", "variant_index": variant_index}
+
+    def update_variant(self, run_id: str, variant_index: int, content: str, user_id: str = "default-user") -> dict:
+        if not content.strip():
+            raise ValidationError("Variant content is required.", code="invalid_variant")
+        run = self._run_or_404(run_id, user_id)
+        if run["status"] in {"pending", "running"}:
+            raise PipelineStateError("Pipeline is not ready for this action.", code="pipeline_not_ready")
+        parsed = run["parsed_content"] or {}
+        variants = list(parsed.get("variants_html") or [])
+        if variant_index < 1 or variant_index > len(variants):
+            raise ValidationError("Variant index is invalid.", code="invalid_variant")
+        variants[variant_index - 1] = content.strip()
+        parsed["variants_html"] = variants
+        selected_variant = int(parsed.get("selected_variant") or 1)
+        if selected_variant == variant_index:
+            parsed["variant_html"] = content.strip()
+        elif variants:
+            parsed["variant_html"] = variants[max(0, min(selected_variant - 1, len(variants) - 1))]
+        results = keep_results_before(parse_results(run["step_results"]), GENERATION_STEP)
+        results.append(step_result(GENERATION_STEP, "variant_html", pipeline_step_title(GENERATION_STEP), parsed.get("variant_html") or variants[0]))
+        score = (run["parsed_content"] or {}).get("self_score") or result_content(parse_results(run["step_results"]), "self_score")
+        if score:
+            results.append(step_result(EVALUATION_STEP, "self_score", pipeline_step_title(EVALUATION_STEP), str(score)))
+        parsed["steps"] = results
+        updated = self._update_run_results(
+            run_id,
+            status="succeeded",
+            assignment_status="processed",
+            current_step=TOTAL_PIPELINE_STEPS,
+            step_results=results,
+            parsed_content=parsed,
+        )
+        return self.run_payload(updated)
 
     def execute_step(
         self,
@@ -502,8 +567,16 @@ class PipelineService:
             "model": selection.model,
         }
         if step == 1:
+            manual_source_text = str((run["parsed_content"] or {}).get("manual_source_text") or "").strip()
+            if manual_source_text:
+                source_html = text_to_json_document(manual_source_text, 1) if self.prompts.is_json_pipeline else text_to_html_document(manual_source_text, 1)
+                response = LLMResponse(source_html, source_html, "local", "manual-text")
+                self._maybe_generate_assignment_title(run, source_html, selection)
+                llm_input["manual_source"] = True
+                return response, step_result(1, "source_html", pipeline_step_title(1), source_html), [], llm_input
             if use_default_source:
                 source_html = normalize_source_document(self.prompts.default_source, self.prompts.is_json_pipeline)
+                self._maybe_generate_assignment_title(run, source_html, selection)
                 llm_input["use_default_source"] = True
                 return (
                     LLMResponse(source_html, source_html, "local", "default-html"),
@@ -544,6 +617,7 @@ class PipelineService:
                 provider=(last_response.provider if last_response else selection.provider),
                 model=(last_response.model if last_response else selection.model),
             )
+            self._maybe_generate_assignment_title(run, content, selection)
             return response, step_result(1, "source_html", pipeline_step_title(1), content), [], llm_input
 
         if step == 2:
@@ -749,6 +823,64 @@ class PipelineService:
             answers_by_variant.append(normalize_llm_text(response.content))
 
         return answers_by_variant, answers_document(answers_by_variant)
+
+    def _maybe_generate_assignment_title(self, run: dict, source_html: str, selection: LLMSelection) -> None:
+        parsed = run.get("parsed_content") or {}
+        if not parsed.get("needs_generated_title"):
+            return
+        try:
+            provider = self._provider(selection)
+            prompt = (
+                "Придумай короткое название для школьного задания. "
+                "Верни только название, без кавычек и пояснений, не длиннее 80 символов.\n\n"
+                f"<assignment>\n{source_html[:6000]}\n</assignment>"
+            )
+            response = provider.complete_text(prompt, model=selection.model or None)
+            title = clean_plain_text(normalize_llm_text(response.content)).strip(" «»\"'")[:120]
+            if not title:
+                return
+            with connect() as conn:
+                conn.execute(
+                    """
+                    update assignments
+                    set title = %s, updated_at = now()
+                    where id = %s and coalesce(nullif(title, ''), '') = ''
+                    """,
+                    (title, run["assignment_id"]),
+                )
+        except Exception:
+            pass
+
+    def _ensure_generation_cooldown_elapsed(self, user_id: str) -> None:
+        last_generation = self._last_generation_finished_at(user_id)
+        if last_generation is None:
+            return
+        remaining = GENERATION_COOLDOWN_SECONDS - seconds_since(last_generation)
+        if remaining > 0:
+            minutes = max(1, int((remaining + 59) // 60))
+            raise ValidationError(
+                f"Новые варианты можно генерировать не чаще одного раза в 5 минут. Подождите примерно {minutes} мин.",
+                code="generation_rate_limited",
+                status_code=429,
+            )
+
+    def _last_generation_finished_at(self, user_id: str):
+        with connect() as conn:
+            row = conn.execute(
+                """
+                select er.finished_at
+                from extraction_runs er
+                join assignments a on a.id = er.assignment_id
+                where a.user_id = %s
+                  and er.status = 'succeeded'
+                  and er.finished_at is not null
+                  and jsonb_array_length(coalesce(er.parsed_content->'variants_html', '[]'::jsonb)) > 0
+                order by er.finished_at desc
+                limit 1
+                """,
+                (user_id,),
+            ).fetchone()
+        return row["finished_at"] if row else None
 
     def _assignment_or_404(self, assignment_id: str, user_id: str | None = None) -> dict:
         with connect() as conn:
@@ -970,7 +1102,7 @@ class PipelineService:
         file.stream.seek(0)
         mime_type, ext = detect_supported_file(file.filename or "", head)
         if mime_type is None:
-            raise ValidationError("Supported files: PNG, JPG, WEBP, PDF, DOC, DOCX.", code="invalid_file_type")
+            raise ValidationError("Supported files: PNG, JPG, WEBP, PDF, DOC, DOCX, TXT.", code="invalid_file_type")
         relative_path = Path("assignments") / assignment_id / f"{uuid.uuid4().hex}{ext}"
         full_path = Path(self.config.FILE_STORAGE_DIR) / relative_path
         full_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1004,6 +1136,10 @@ class PipelineService:
         if mime_type in {"application/vnd.openxmlformats-officedocument.wordprocessingml.document", "application/msword"}:
             source = json_from_doc(file_path, index) if json_pipeline else html_from_doc(file_path, index)
             response = LLMResponse(content=source, raw_response=source, provider="local", model="doc-reader")
+            return {"html": source, "raw": {"index": index, "mime_type": mime_type}, "response": response}
+        if mime_type == "text/plain":
+            source = json_from_txt(file_path, index) if json_pipeline else html_from_txt(file_path, index)
+            response = LLMResponse(content=source, raw_response=source, provider="local", model="text-reader")
             return {"html": source, "raw": {"index": index, "mime_type": mime_type}, "response": response}
         raise ValidationError("Unsupported file type for parsing.", code="invalid_file_type")
 
@@ -1102,6 +1238,8 @@ def detect_supported_file(filename: str, head: bytes) -> tuple[str | None, str]:
         return "application/vnd.openxmlformats-officedocument.wordprocessingml.document", ".docx"
     if ext == ".doc":
         return "application/msword", ".doc"
+    if ext == ".txt":
+        return "text/plain", ".txt"
     return None, ""
 
 
@@ -1140,6 +1278,14 @@ def json_from_doc(file_path: str, index: int) -> str:
     return text_to_json_document(read_doc_text(Path(file_path)), index)
 
 
+def html_from_txt(file_path: str, index: int) -> str:
+    return text_to_html_document(read_txt_text(Path(file_path)), index)
+
+
+def json_from_txt(file_path: str, index: int) -> str:
+    return text_to_json_document(read_txt_text(Path(file_path)), index)
+
+
 def text_to_html_document(text: str, index: int) -> str:
     clean = text.strip() or "Не удалось извлечь текст из файла."
     paragraphs = "".join(f"<p>{escape_html(line)}</p>" for line in clean.splitlines() if line.strip())
@@ -1166,6 +1312,16 @@ def read_docx_text_from_bytes(raw: bytes) -> str:
 def read_doc_text(path: Path) -> str:
     with path.open("rb") as f:
         raw = f.read()
+    return raw.decode("utf-8", errors="ignore")
+
+
+def read_txt_text(path: Path) -> str:
+    raw = path.read_bytes()
+    for encoding in ("utf-8-sig", "utf-8", "cp1251"):
+        try:
+            return raw.decode(encoding)
+        except UnicodeDecodeError:
+            continue
     return raw.decode("utf-8", errors="ignore")
 
 
@@ -1657,3 +1813,16 @@ def iso(value: Any) -> str | None:
     if hasattr(value, "isoformat"):
         return value.isoformat()
     return str(value)
+
+
+def seconds_since(value: Any) -> float:
+    from datetime import datetime, timezone
+
+    if value is None:
+        return float("inf")
+    if not hasattr(value, "timestamp"):
+        return float("inf")
+    current = datetime.now(timezone.utc)
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return max(0.0, current.timestamp() - value.timestamp())

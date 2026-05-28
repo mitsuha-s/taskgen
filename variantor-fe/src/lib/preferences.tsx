@@ -13,14 +13,14 @@ type Preferences = {
 const PreferencesContext = createContext<Preferences | null>(null);
 
 export function PreferencesProvider({ children }: { children: ReactNode }) {
-  const [theme, setTheme] = useState<ThemeMode>(() => (localStorage.getItem('taskgen-theme') === 'dark' ? 'dark' : 'light'));
-  const [accessible, setAccessible] = useState(() => localStorage.getItem('taskgen-accessible') === 'true');
+  const [theme, setTheme] = useState<ThemeMode>(() => (localStorage.getItem('variantor-theme') === 'dark' ? 'dark' : 'light'));
+  const [accessible, setAccessible] = useState(() => localStorage.getItem('variantor-accessible') === 'true');
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
     document.documentElement.dataset.accessible = accessible ? 'true' : 'false';
-    localStorage.setItem('taskgen-theme', theme);
-    localStorage.setItem('taskgen-accessible', String(accessible));
+    localStorage.setItem('variantor-theme', theme);
+    localStorage.setItem('variantor-accessible', String(accessible));
   }, [theme, accessible]);
 
   const value = useMemo(

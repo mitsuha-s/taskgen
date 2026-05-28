@@ -30,7 +30,7 @@ export function AppShell({ children }: AppShellProps) {
               <BookOpenCheck className="h-5 w-5" aria-hidden="true" />
             </span>
             <span>
-              <span className="block text-sm font-bold text-ink">TaskGen</span>
+              <span className="block text-sm font-bold text-ink">Variantor</span>
               <span className="block text-xs text-slate-500">Ассистент учителя</span>
             </span>
           </Link>

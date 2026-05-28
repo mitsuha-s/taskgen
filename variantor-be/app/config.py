@@ -29,7 +29,7 @@ class Config:
         item.strip().lower()
         for item in os.getenv(
             "ALLOWED_UPLOAD_EXTENSIONS",
-            ".png,.jpg,.jpeg,.webp",
+            ".png,.jpg,.jpeg,.webp,.pdf,.doc,.docx,.txt",
         ).split(",")
         if item.strip()
     }

@@ -94,6 +94,7 @@ export type LLMOptions = {
 
 export type ExtractionOptions = {
   use_default_source?: boolean;
+  manual_source_text?: string;
   step_provider?: string;
   step_model?: string;
   final_provider?: string;
@@ -166,6 +167,11 @@ export const api = {
   createAssignment: (title: string) =>
     request<Assignment>('/api/assignments', {
       method: 'POST',
+      body: JSON.stringify({ title }),
+    }),
+  updateAssignmentTitle: (assignmentId: string, title: string) =>
+    request<Assignment>(`/api/assignments/${assignmentId}`, {
+      method: 'PUT',
       body: JSON.stringify({ title }),
     }),
   uploadImage: (assignmentId: string, file: File) => {
@@ -243,6 +249,11 @@ export const api = {
       `/api/extraction-runs/${runId}/variants/${variantIndex}/regenerate`,
       { method: 'POST', body: JSON.stringify(options ?? {}) },
     ),
+  updateVariant: (runId: string, variantIndex: number, content: string) =>
+    request<ExtractionRun>(`/api/extraction-runs/${runId}/variants/${variantIndex}`, {
+      method: 'PUT',
+      body: JSON.stringify({ content }),
+    }),
 };
 
 export function userMessage(error: unknown): string {

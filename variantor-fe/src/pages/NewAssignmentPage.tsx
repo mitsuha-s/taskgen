@@ -1,6 +1,6 @@
 import { zodResolver } from '@hookform/resolvers/zod';
 import { useMutation } from '@tanstack/react-query';
-import { FileText, Loader2, UploadCloud } from 'lucide-react';
+import { FileText, Keyboard, Loader2, UploadCloud } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { useForm } from 'react-hook-form';
 import { useNavigate } from 'react-router-dom';
@@ -8,7 +8,7 @@ import { z } from 'zod';
 import { api, ExtractionOptions, userMessage } from '../lib/api';
 
 const maxFileSize = 10 * 1024 * 1024;
-const allowedExtensions = ['.png', '.jpg', '.jpeg', '.webp', '.pdf', '.doc', '.docx'];
+const allowedExtensions = ['.png', '.jpg', '.jpeg', '.webp', '.pdf', '.doc', '.docx', '.txt'];
 let uploadItemCounter = 0;
 
 const schema = z.object({
@@ -17,6 +17,7 @@ const schema = z.object({
 
 type FormValues = z.infer<typeof schema>;
 type UploadItem = { id: string; file: File };
+type SourceMode = 'files' | 'manual';
 export default function NewAssignmentPage() {
   const navigate = useNavigate();
   const [submitError, setSubmitError] = useState<string | null>(null);
@@ -24,6 +25,8 @@ export default function NewAssignmentPage() {
   const [isDragActive, setIsDragActive] = useState(false);
   const [dragDepth, setDragDepth] = useState(0);
   const [draggedId, setDraggedId] = useState<string | null>(null);
+  const [sourceMode, setSourceMode] = useState<SourceMode>('files');
+  const [manualText, setManualText] = useState('');
 
   const form = useForm<FormValues>({
     resolver: zodResolver(schema),
@@ -45,14 +48,14 @@ export default function NewAssignmentPage() {
   useEffect(() => {
     function onPaste(event: ClipboardEvent) {
       const pasted = Array.from(event.clipboardData?.files ?? []);
-      if (pasted.length > 0) {
+      if (sourceMode === 'files' && pasted.length > 0) {
         event.preventDefault();
         appendFiles(pasted);
       }
     }
     window.addEventListener('paste', onPaste);
     return () => window.removeEventListener('paste', onPaste);
-  }, []);
+  }, [sourceMode]);
 
   useEffect(() => {
     function hasFiles(event: DragEvent) {
@@ -95,7 +98,9 @@ export default function NewAssignmentPage() {
       event.preventDefault();
       setDragDepth(0);
       setIsDragActive(false);
-      appendFiles(Array.from(event.dataTransfer?.files ?? []));
+      if (sourceMode === 'files') {
+        appendFiles(Array.from(event.dataTransfer?.files ?? []));
+      }
     }
 
     window.addEventListener('dragenter', onDragEnter);
@@ -108,7 +113,7 @@ export default function NewAssignmentPage() {
       window.removeEventListener('dragleave', onDragLeave);
       window.removeEventListener('drop', onDrop);
     };
-  }, []);
+  }, [sourceMode]);
 
   function appendFiles(incoming: File[]) {
     const accepted = incoming.filter((file) => {
@@ -150,16 +155,23 @@ export default function NewAssignmentPage() {
 
   async function onSubmit(values: FormValues) {
     setSubmitError(null);
-    if (files.length === 0) {
+    const cleanManualText = manualText.trim();
+    if (sourceMode === 'files' && files.length === 0) {
       setSubmitError('Добавьте хотя бы один файл.');
+      return;
+    }
+    if (sourceMode === 'manual' && !cleanManualText) {
+      setSubmitError('Введите текст задания.');
       return;
     }
     try {
       const assignment = await createAssignment.mutateAsync(values.title ?? '');
-      await uploadFiles.mutateAsync({ assignmentId: assignment.id, upload: files.map((item) => item.file) });
+      if (sourceMode === 'files') {
+        await uploadFiles.mutateAsync({ assignmentId: assignment.id, upload: files.map((item) => item.file) });
+      }
       const run = await startExtraction.mutateAsync({
         assignmentId: assignment.id,
-        options: {},
+        options: sourceMode === 'manual' ? { manual_source_text: cleanManualText } : {},
       });
       navigate(`/assignments/${assignment.id}/review?run=${run.extraction_run_id}`);
     } catch (error) {
@@ -180,7 +192,7 @@ export default function NewAssignmentPage() {
         <div>
           <p className="text-sm font-semibold text-honey">Новый материал</p>
           <h1 className="mt-2 text-3xl font-bold tracking-tight">Создать варианты задания</h1>
-          <p className="mt-2 max-w-2xl text-sm leading-6 text-white/78">Поддерживаются изображения, PDF и DOC/DOCX. Можно вставить Ctrl+V или перетащить файлы.</p>
+          <p className="mt-2 max-w-2xl text-sm leading-6 text-white/78">Поддерживаются изображения, PDF, DOC/DOCX, TXT и ручной ввод.</p>
         </div>
         <div className="flex items-center gap-3 rounded-lg bg-white/12 px-4 py-3 text-sm text-white/86">
           <FileText className="h-5 w-5 text-honey" aria-hidden="true" />
@@ -196,54 +208,88 @@ export default function NewAssignmentPage() {
               <input id="title" className="field" placeholder="Например: Unit 3 Grammar Test" {...form.register('title')} />
             </div>
 
-            <div className="space-y-2">
-              <div className="flex items-center justify-between gap-3">
-                <label className="label" htmlFor="file-input">Файлы задания</label>
-              </div>
-              <label className="flex min-h-28 cursor-pointer flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-slate-300 bg-[linear-gradient(135deg,#ffffff,#f7f5ff)] px-4 py-6 text-center transition hover:border-leaf hover:bg-moss/30" htmlFor="file-input">
-                <span className="text-sm font-medium text-slate-800">Нажмите или перетащите файлы</span>
-                <span className="text-xs text-slate-500">PNG, JPG, WEBP, PDF, DOC, DOCX до 10 MB каждый</span>
-              </label>
-              <input
-                id="file-input"
-                className="sr-only"
-                type="file"
-                multiple
-                accept=".png,.jpg,.jpeg,.webp,.pdf,.doc,.docx"
-                onChange={(event) => appendFiles(Array.from(event.target.files ?? []))}
-              />
+            <div className="flex flex-wrap gap-2">
+              <button
+                className={`btn-secondary ${sourceMode === 'files' ? 'border-leaf bg-[linear-gradient(135deg,#e7e5ff,#dff7ff)] text-leaf' : ''}`}
+                type="button"
+                onClick={() => setSourceMode('files')}
+              >
+                <UploadCloud className="h-4 w-4" aria-hidden="true" />
+                Загрузить файлы
+              </button>
+              <button
+                className={`btn-secondary ${sourceMode === 'manual' ? 'border-leaf bg-[linear-gradient(135deg,#e7e5ff,#dff7ff)] text-leaf' : ''}`}
+                type="button"
+                onClick={() => setSourceMode('manual')}
+              >
+                <Keyboard className="h-4 w-4" aria-hidden="true" />
+                Ввести вручную
+              </button>
             </div>
 
-            <div className="space-y-2 rounded-lg border border-slate-200/90 bg-white/70 p-3">
-              <div className="text-sm font-semibold text-slate-800">Порядок файлов</div>
-              <div className="space-y-2">
-                {files.map((item, index) => (
-                  <div
-                    key={item.id}
-                    className="flex items-center justify-between rounded-md border border-slate-200 bg-white px-3 py-2 text-sm"
-                    draggable
-                    onDragStart={() => setDraggedId(item.id)}
-                    onDragOver={(event) => event.preventDefault()}
-                    onDrop={() => {
-                      if (draggedId) {
-                        moveItem(draggedId, item.id);
-                      }
-                      setDraggedId(null);
-                    }}
-                  >
-                    <span>{index + 1}. {item.file.name}</span>
-                    <button
-                      className="text-xs text-red-600"
-                      type="button"
-                      onClick={() => setFiles((current) => current.filter((entry) => entry.id !== item.id))}
-                    >
-                      Удалить
-                    </button>
+            {sourceMode === 'files' ? (
+              <>
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between gap-3">
+                    <label className="label" htmlFor="file-input">Файлы задания</label>
                   </div>
-                ))}
-                {files.length === 0 ? <div className="text-sm text-slate-500">Файлы не добавлены.</div> : null}
+                  <label className="flex min-h-28 cursor-pointer flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-slate-300 bg-[linear-gradient(135deg,#ffffff,#f7f5ff)] px-4 py-6 text-center transition hover:border-leaf hover:bg-moss/30" htmlFor="file-input">
+                    <span className="text-sm font-medium text-slate-800">Нажмите или перетащите файлы</span>
+                    <span className="text-xs text-slate-500">PNG, JPG, WEBP, PDF, DOC, DOCX, TXT до 10 MB каждый</span>
+                  </label>
+                  <input
+                    id="file-input"
+                    className="sr-only"
+                    type="file"
+                    multiple
+                    accept=".png,.jpg,.jpeg,.webp,.pdf,.doc,.docx,.txt"
+                    onChange={(event) => appendFiles(Array.from(event.target.files ?? []))}
+                  />
+                </div>
+
+                <div className="space-y-2 rounded-lg border border-slate-200/90 bg-white/70 p-3">
+                  <div className="text-sm font-semibold text-slate-800">Порядок файлов</div>
+                  <div className="space-y-2">
+                    {files.map((item, index) => (
+                      <div
+                        key={item.id}
+                        className="flex items-center justify-between rounded-md border border-slate-200 bg-white px-3 py-2 text-sm"
+                        draggable
+                        onDragStart={() => setDraggedId(item.id)}
+                        onDragOver={(event) => event.preventDefault()}
+                        onDrop={() => {
+                          if (draggedId) {
+                            moveItem(draggedId, item.id);
+                          }
+                          setDraggedId(null);
+                        }}
+                      >
+                        <span>{index + 1}. {item.file.name}</span>
+                        <button
+                          className="text-xs text-red-600"
+                          type="button"
+                          onClick={() => setFiles((current) => current.filter((entry) => entry.id !== item.id))}
+                        >
+                          Удалить
+                        </button>
+                      </div>
+                    ))}
+                    {files.length === 0 ? <div className="text-sm text-slate-500">Файлы не добавлены.</div> : null}
+                  </div>
+                </div>
+              </>
+            ) : (
+              <div className="space-y-2">
+                <label className="label" htmlFor="manual-source">Текст задания</label>
+                <textarea
+                  id="manual-source"
+                  className="field min-h-80"
+                  value={manualText}
+                  onChange={(event) => setManualText(event.target.value)}
+                  placeholder="Вставьте исходный вариант задания целиком"
+                />
               </div>
-            </div>
+            )}
 
             {submitError ? <p className="text-sm text-red-700">{submitError}</p> : null}
 

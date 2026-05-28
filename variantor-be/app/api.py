@@ -105,6 +105,11 @@ def create_assignment():
     assignment = service().create_assignment(payload.get("title") or "", current_user().id)
     return jsonify(assignment), 201
 
+@api.put("/assignments/<assignment_id>")
+def update_assignment(assignment_id: str):
+    payload = request.get_json(silent=True) or {}
+    return jsonify(service().update_assignment_title(assignment_id, payload.get("title") or "", current_user().id))
+
 
 @api.get("/assignments/<assignment_id>")
 def get_assignment(assignment_id: str):
@@ -163,6 +168,12 @@ def regenerate_extraction_step(run_id: str, step: int):
 def regenerate_extraction_variant(run_id: str, variant_index: int):
     payload = request.get_json(silent=True) or {}
     return jsonify(service().regenerate_variant(run_id, variant_index, payload, current_user().id)), 202
+
+
+@api.put("/extraction-runs/<run_id>/variants/<int:variant_index>")
+def update_extraction_variant(run_id: str, variant_index: int):
+    payload = request.get_json(silent=True) or {}
+    return jsonify(service().update_variant(run_id, variant_index, payload.get("content") or "", current_user().id))
 
 
 @api.get("/files/assignment-images/<image_id>")

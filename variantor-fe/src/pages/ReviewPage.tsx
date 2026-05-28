@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { AlertCircle, ArrowRight, CheckCircle2, Download, FileText, Loader2, RotateCcw, Save } from 'lucide-react';
-import { useRef, useState } from 'react';
+import { AlertCircle, ArrowRight, CheckCircle2, Download, FileText, Loader2, Pencil, RotateCcw, Save, X } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { api, ExtractionOptions, PipelineStepResult, userMessage } from '../lib/api';
 import { renderMathMarkers } from '../lib/math';
@@ -14,12 +14,20 @@ export default function ReviewPage() {
   const queryClient = useQueryClient();
   const runId = searchParams.get('run');
   const [variantCount, setVariantCount] = useState(3);
+  const [editingTitle, setEditingTitle] = useState(false);
+  const [titleDraft, setTitleDraft] = useState('');
 
   const assignment = useQuery({
     queryKey: ['assignment', id],
     queryFn: () => api.getAssignment(id!),
     enabled: Boolean(id),
   });
+
+  useEffect(() => {
+    if (assignment.data?.title !== undefined && !editingTitle) {
+      setTitleDraft(assignment.data.title);
+    }
+  }, [assignment.data?.title, editingTitle]);
 
   const run = useQuery({
     queryKey: ['extraction-run', runId],
@@ -48,6 +56,20 @@ export default function ReviewPage() {
   const updateStep = useMutation({
     mutationFn: ({ step, content }: { step: number; content: string }) =>
       api.updateExtractionStep(runId!, step, content),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ['extraction-run', runId] });
+    },
+  });
+  const updateTitle = useMutation({
+    mutationFn: (title: string) => api.updateAssignmentTitle(id!, title),
+    onSuccess: async () => {
+      setEditingTitle(false);
+      await queryClient.invalidateQueries({ queryKey: ['assignment', id] });
+    },
+  });
+  const updateVariant = useMutation({
+    mutationFn: ({ variantIndex, content }: { variantIndex: number; content: string }) =>
+      api.updateVariant(runId!, variantIndex, content),
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ['extraction-run', runId] });
     },
@@ -83,6 +105,12 @@ export default function ReviewPage() {
     };
   };
 
+  useEffect(() => {
+    if (run.data) {
+      queryClient.invalidateQueries({ queryKey: ['assignment', id] });
+    }
+  }, [run.data?.status, run.data?.current_step, id, queryClient]);
+
   if (!id || !runId) {
     return (
       <div className="panel p-5 text-sm text-red-700">
@@ -101,7 +129,29 @@ export default function ReviewPage() {
             </span>
             <div>
               <h1 className="text-2xl font-bold tracking-tight text-ink">Обработка задания</h1>
-              <p className="mt-1 text-sm text-slate-600">{assignment.data?.title || 'Эталонное задание'}</p>
+              {editingTitle ? (
+                <div className="mt-2 flex flex-col gap-2 sm:flex-row">
+                  <input
+                    className="field min-w-72"
+                    value={titleDraft}
+                    onChange={(event) => setTitleDraft(event.target.value)}
+                    maxLength={160}
+                  />
+                  <button className="btn-primary" disabled={updateTitle.isPending} type="button" onClick={() => updateTitle.mutate(titleDraft)}>
+                    {updateTitle.isPending ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" /> : <Save className="h-4 w-4" aria-hidden="true" />}
+                    Сохранить
+                  </button>
+                  <button className="btn-secondary" type="button" onClick={() => setEditingTitle(false)}>
+                    <X className="h-4 w-4" aria-hidden="true" />
+                    Отмена
+                  </button>
+                </div>
+              ) : (
+                <button className="mt-1 flex items-center gap-2 text-left text-sm text-slate-600" type="button" onClick={() => setEditingTitle(true)}>
+                  <span>{assignment.data?.title || 'Название формируется'}</span>
+                  <Pencil className="h-3.5 w-3.5" aria-hidden="true" />
+                </button>
+              )}
             </div>
           </div>
           <div className="mt-4 flex flex-wrap gap-2">
@@ -174,6 +224,7 @@ export default function ReviewPage() {
                   selectedVariant={selectedVariant}
                   processing={isRunning || regenerateVariant.isPending}
                   onRegenerateVariant={(index) => regenerateVariant.mutate(index)}
+                  onUpdateVariant={(variantIndex, content) => updateVariant.mutateAsync({ variantIndex, content })}
                   onAcceptVariant={async (variant) => {
                     await updateStep.mutateAsync({ step: 3, content: variant });
                   }}
@@ -209,12 +260,16 @@ function PipelineResults({
   onVariantCountChange: (value: number) => void;
   onRegenerate: (step: number) => void;
 }) {
+  const [editingStepKey, setEditingStepKey] = useState<string | null>(null);
   return (
     <div className="space-y-3">
       {steps.map((step) => {
         const isEditableCheckpoint = canEdit && step.step === currentStep && step.step === 2;
+        const canRawEdit = canEdit && step.step === 1;
+        const stepKey = `${step.step}-${step.key}`;
+        const isRawEditing = editingStepKey === stepKey;
         return (
-          <article key={`${step.step}-${step.key}`} className="overflow-hidden rounded-lg border border-slate-200/80 bg-white/95 shadow-sm">
+          <article key={stepKey} className="overflow-hidden rounded-lg border border-slate-200/80 bg-white/95 shadow-sm">
             <div className="flex flex-col gap-2 border-b border-slate-200/80 bg-[linear-gradient(90deg,#ffffff,rgba(231,229,255,0.58),rgba(223,247,255,0.5))] px-3 py-2 sm:flex-row sm:items-center sm:justify-between">
               <div className="flex items-center gap-2">
                 <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-[linear-gradient(135deg,#266f85,#5b7cfa)] text-xs font-semibold text-white">
@@ -222,14 +277,36 @@ function PipelineResults({
                 </span>
                 <h2 className="text-sm font-semibold text-slate-900">{step.title}</h2>
               </div>
-              {canEdit && step.step !== 4 ? (
-                <button className="btn-secondary px-3 py-1.5 text-xs" disabled={processing} onClick={() => onRegenerate(step.step)} type="button">
-                  {processing ? <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" /> : <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />}
-                  Перегенерировать
-                </button>
-              ) : null}
+              <div className="flex flex-wrap gap-2">
+                {canRawEdit ? (
+                  <button className="btn-secondary px-3 py-1.5 text-xs" disabled={processing} onClick={() => setEditingStepKey(isRawEditing ? null : stepKey)} type="button">
+                    <Pencil className="h-3.5 w-3.5" aria-hidden="true" />
+                    {isRawEditing ? 'Закрыть редактор' : 'Редактировать'}
+                  </button>
+                ) : null}
+                {canEdit && step.step !== 4 ? (
+                  <button className="btn-secondary px-3 py-1.5 text-xs" disabled={processing} onClick={() => onRegenerate(step.step)} type="button">
+                    {processing ? <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" /> : <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />}
+                    Перегенерировать
+                  </button>
+                ) : null}
+              </div>
             </div>
-            {isEditableCheckpoint && step.step === 2 ? (
+            {isRawEditing ? (
+              <RawContentEditor
+                content={step.content}
+                processing={processing}
+                onCancel={() => setEditingStepKey(null)}
+                onSave={async (content) => {
+                  await onSave(step.step, content);
+                  setEditingStepKey(null);
+                }}
+                onSaveAndContinue={async (content) => {
+                  await onSaveAndContinue(step.step, content);
+                  setEditingStepKey(null);
+                }}
+              />
+            ) : isEditableCheckpoint && step.step === 2 ? (
               <ParameterEditor
                 content={step.content}
                 processing={processing}
@@ -244,6 +321,41 @@ function PipelineResults({
           </article>
         );
       })}
+    </div>
+  );
+}
+
+function RawContentEditor({
+  content,
+  processing,
+  onSave,
+  onSaveAndContinue,
+  onCancel,
+}: {
+  content: string;
+  processing: boolean;
+  onSave: (content: string) => Promise<unknown>;
+  onSaveAndContinue: (content: string) => Promise<unknown>;
+  onCancel: () => void;
+}) {
+  const [draft, setDraft] = useState(content);
+  return (
+    <div className="space-y-3 bg-white p-4">
+      <textarea className="field min-h-96 font-mono text-xs" value={draft} onChange={(event) => setDraft(event.target.value)} />
+      <div className="flex flex-col gap-2 sm:flex-row">
+        <button className="btn-secondary" disabled={processing || !draft.trim()} onClick={() => onSave(draft)} type="button">
+          {processing ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" /> : <Save className="h-4 w-4" aria-hidden="true" />}
+          Сохранить
+        </button>
+        <button className="btn-primary" disabled={processing || !draft.trim()} onClick={() => onSaveAndContinue(draft)} type="button">
+          {processing ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" /> : <ArrowRight className="h-4 w-4" aria-hidden="true" />}
+          Сохранить и продолжить
+        </button>
+        <button className="btn-secondary" disabled={processing} onClick={onCancel} type="button">
+          <X className="h-4 w-4" aria-hidden="true" />
+          Отмена
+        </button>
+      </div>
     </div>
   );
 }
@@ -484,6 +596,7 @@ function FinalDocumentCard({
   selectedVariant,
   processing,
   onRegenerateVariant,
+  onUpdateVariant,
   onAcceptVariant,
   title,
 }: {
@@ -494,6 +607,7 @@ function FinalDocumentCard({
   selectedVariant: number;
   processing: boolean;
   onRegenerateVariant: (variantIndex: number) => void;
+  onUpdateVariant: (variantIndex: number, content: string) => Promise<unknown>;
   onAcceptVariant: (variant: string) => Promise<unknown>;
   title: string;
 }) {
@@ -507,6 +621,9 @@ function FinalDocumentCard({
   const [generatingAllAnswers, setGeneratingAllAnswers] = useState(false);
   const [activeIndex, setActiveIndex] = useState(Math.max(0, selectedVariant - 1));
   const [accepting, setAccepting] = useState(false);
+  const [editingVariant, setEditingVariant] = useState(false);
+  const [variantDraft, setVariantDraft] = useState('');
+  const [savingVariant, setSavingVariant] = useState(false);
 
   const safeVariants = variants.filter((variant) => variant.trim().length > 0);
   const activeVariant = safeVariants[activeIndex] ?? '';
@@ -584,6 +701,19 @@ function FinalDocumentCard({
     }
   }
 
+  async function saveVariantEdit() {
+    if (!variantDraft.trim()) {
+      return;
+    }
+    setSavingVariant(true);
+    try {
+      await onUpdateVariant(activeIndex + 1, variantDraft);
+      setEditingVariant(false);
+    } finally {
+      setSavingVariant(false);
+    }
+  }
+
   async function downloadAnswersPDF() {
     if (!answerDocumentRef.current || !activeAnswers.trim()) {
       return;
@@ -642,6 +772,18 @@ function FinalDocumentCard({
             {accepting ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" /> : <CheckCircle2 className="h-4 w-4" aria-hidden="true" />}
             Принять вариант
           </button>
+          <button
+            className="btn-secondary"
+            disabled={processing || savingVariant}
+            onClick={() => {
+              setVariantDraft(activeVariant);
+              setEditingVariant(true);
+            }}
+            type="button"
+          >
+            <Pencil className="h-4 w-4" aria-hidden="true" />
+            Редактировать вариант
+          </button>
           <button className="btn-secondary" disabled={generatingAll || safeVariants.length === 0} onClick={downloadAllVariantsPDF} type="button">
             {generatingAll ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" /> : <Download className="h-4 w-4" aria-hidden="true" />}
             Скачать все варианты PDF
@@ -667,7 +809,10 @@ function FinalDocumentCard({
             key={`variant-tab-${index}`}
             className={`btn-secondary px-3 py-1.5 text-xs ${index === activeIndex ? 'border-leaf bg-[linear-gradient(135deg,#e7e5ff,#dff7ff)] text-leaf' : ''}`}
             type="button"
-            onClick={() => setActiveIndex(index)}
+            onClick={() => {
+              setActiveIndex(index);
+              setEditingVariant(false);
+            }}
           >
             Вариант {index + 1}
           </button>
@@ -689,9 +834,25 @@ function FinalDocumentCard({
               Перегенерировать
             </button>
           </div>
-          <div className="max-h-[640px] overflow-auto px-5 py-4 text-sm">
-            <HTMLDocument html={activeVariant} />
-          </div>
+          {editingVariant ? (
+            <div className="space-y-3 px-5 py-4">
+              <textarea className="field min-h-[520px] font-mono text-xs" value={variantDraft} onChange={(event) => setVariantDraft(event.target.value)} />
+              <div className="flex flex-col gap-2 sm:flex-row">
+                <button className="btn-primary" disabled={savingVariant || !variantDraft.trim()} onClick={saveVariantEdit} type="button">
+                  {savingVariant ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" /> : <Save className="h-4 w-4" aria-hidden="true" />}
+                  Сохранить вариант
+                </button>
+                <button className="btn-secondary" disabled={savingVariant} onClick={() => setEditingVariant(false)} type="button">
+                  <X className="h-4 w-4" aria-hidden="true" />
+                  Отмена
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="max-h-[640px] overflow-auto px-5 py-4 text-sm">
+              <HTMLDocument html={activeVariant} />
+            </div>
+          )}
         </article>
       </div>
 
@@ -736,14 +897,34 @@ function HTMLDocument({ html }: { html: string }) {
   );
 }
 
+type PipelineTask = {
+  title?: string;
+  text?: string;
+  [key: string]: unknown;
+};
+
+function parsePipelineTasks(value: string): { tasks: PipelineTask[] } {
+  try {
+    const parsed = JSON.parse(value) as { tasks?: PipelineTask[] } | PipelineTask[];
+    if (Array.isArray(parsed)) {
+      return { tasks: parsed };
+    }
+    if (parsed && Array.isArray(parsed.tasks)) {
+      return { tasks: parsed.tasks };
+    }
+  } catch {
+    return { tasks: [] };
+  }
+  return { tasks: [] };
+}
+
 function jsonPipelineDocumentToHTML(value: string) {
   try {
-    const parsed = JSON.parse(value) as { tasks?: Array<{ title?: string; text?: string }> } | Array<{ title?: string; text?: string }>;
-    const tasks = Array.isArray(parsed) ? parsed : parsed.tasks;
-    if (!Array.isArray(tasks)) {
+    const parsed = parsePipelineTasks(value);
+    if (parsed.tasks.length === 0) {
       return null;
     }
-    return tasks.map((task, index) => {
+    return parsed.tasks.map((task, index) => {
       const title = cleanPlainText(task.title || '') || `Задание ${index + 1}`;
       const text = stripTaskHeadings(task.text?.trim() || '');
       return `<section><h2>${escapeHTML(title)}</h2>${text}</section>`;
